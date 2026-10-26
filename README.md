@@ -1,14 +1,141 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/SAP/langgraph-checkpoint-sap-agent-memory-service)](https://api.reuse.software/info/github.com/SAP/langgraph-checkpoint-sap-agent-memory-service)
 
-# langgraph-checkpoint-sap-agent-memory-service
+# LangGraph checkpointers for SAP Agent Memory Service
 
 ## About this project
+This library provides an implementation of LangGraph's checkpoint saver backed by the [SAP HANA Agent Memory Service](https://help.sap.com/docs/hana-cloud/sap-hana-cloud-agent-memory-service-guide/sap-hana-cloud-agent-memory-service-guide?locale=en-US). Use it when you want LangGraph state persistence backed by SAP Agent Memory Service for durable, long-running workflows and agents.
 
-A free, open-source LangGraph's checkpoint saver that uses SAP Agent Memory Service. It enables state persistence backed by SAP Agent Memory Service for durable, long-running workflows and agents.
+Supports conversation continuity, crash recovery, human-in-the-loop (HITL) pause/resume, and full state history — with no database to manage.
 
 ## Requirements and Setup
 
-*Insert a short description what is required to get your project running...*
+- Python ≥ 3.10
+- A running instance of the SAP HANA Agent Memory Service
+- Understanding of [LangGraph's checkpointer](https://reference.langchain.com/python/langgraph.checkpoint) concepts
+
+### Installation
+
+```bash
+pip install langgraph-checkpoint-sap-agent-memory        # Using pip
+uv add langgraph-checkpoint-sap-agent-memory             # Using uv
+
+```
+
+### Quick start
+
+#### Basic setup
+
+Use `HanaAgentMemorySaver()` with automatic credential detection:
+
+```python
+from langgraph.checkpoint.sap.agent_memory import HanaAgentMemorySaver
+
+saver = HanaAgentMemorySaver()
+graph = builder.compile(checkpointer=saver)
+
+# First run — checkpoints are saved automatically at each node boundary
+result = await graph.ainvoke(
+    {"messages": [HumanMessage("Plan my trip to Paris")]},
+    config={"configurable": {"thread_id": "trip-001"}},
+)
+
+# Resume after a crash — same thread_id restores the latest checkpoint
+result = await graph.ainvoke(
+    None,
+    config={"configurable": {"thread_id": "trip-001"}},
+)
+```
+
+`HanaAgentMemorySaver()` reads `AGENT_MEMORY_BASE_URL`, `AGENT_MEMORY_TOKEN_URL`,
+`AGENT_MEMORY_CLIENT_ID`, and `AGENT_MEMORY_CLIENT_SECRET` automatically.
+See [Environment variables](#environment-variables) for details.
+
+#### Custom configuration
+
+Pass credentials directly if you prefer explicit configuration:
+
+```python
+from langgraph.checkpoint.sap.agent_memory import HanaAgentMemorySaver
+
+saver = HanaAgentMemorySaver(
+    base_url="https://<service-host>",
+    token_url="https://<tenant>.authentication.<region>/oauth/token",
+    client_id="<client-id>",
+    client_secret="<client-secret>",
+)
+graph = builder.compile(checkpointer=saver)
+```
+
+## Common usage patterns
+
+### Crash recovery
+
+Every node transition is saved. If the process crashes mid-run, restart with the same `thread_id` and LangGraph resumes from the last committed checkpoint — no special code required.
+
+```python
+# Run 1 — crashes after node_2
+graph.invoke(initial_state, config)  # raises
+
+# Run 2 — resumes from node_3, skips node_1 and node_2
+graph.invoke(None, config)
+```
+
+### Human-in-the-loop (HITL)
+
+Use LangGraph's `interrupt()` to pause at a node and resume with human input. The checkpoint preserves the interrupted state across process boundaries.
+
+```python
+from langgraph.types import interrupt, Command
+
+def approval_node(state):
+    decision = interrupt({"question": "Approve this action?"})
+    return {"approved": decision["approved"]}
+
+# Pause — graph.invoke raises NodeInterrupt
+graph.invoke(initial_state, config)
+
+# Resume with human input
+graph.invoke(Command(resume={"approved": True}), config)
+```
+
+## State history
+
+```python
+# All checkpoints for a thread, newest first
+for tup in graph.get_state_history(config):
+    print(tup.config["configurable"]["checkpoint_id"])
+    print(tup.metadata)
+```
+
+## Subgraph support
+
+Nested subgraphs work without any extra configuration. LangGraph sets `checkpoint_ns` automatically using a pipe-separated format (`"outer_node:uuid|inner_node:uuid"`), which maps directly to the `snapshotScope` field in the Agent Memory Service.
+
+## Configuration reference
+
+### `HanaAgentMemorySaver`
+
+All four credentials are required. Each can be supplied as a constructor argument, an environment variable, or both (constructor wins).
+
+| Parameter       | Type                         | Environment variable          | Default              | Description                                          |
+| --------------- | ---------------------------- | ----------------------------- | -------------------- | ---------------------------------------------------- |
+| `base_url`      | `str \| None`                | `AGENT_MEMORY_BASE_URL`       | —                    | Agent Memory Service base URL, e.g. `https://<host>` |
+| `token_url`     | `str \| None`                | `AGENT_MEMORY_TOKEN_URL`      | —                    | OAuth2 token endpoint (`client_credentials` grant)   |
+| `client_id`     | `str \| None`                | `AGENT_MEMORY_CLIENT_ID`      | —                    | OAuth2 client ID                                     |
+| `client_secret` | `str \| None`                | `AGENT_MEMORY_CLIENT_SECRET`  | —                    | OAuth2 client secret                                 |
+| `timeout`       | `float`                      | —                             | `30.0`               | HTTP request timeout in seconds                      |
+| `serde`         | `SerializerProtocol \| None` | —                             | `JsonPlusSerializer` | Custom serializer for checkpoint state               |
+
+### Environment variables
+
+```bash
+AGENT_MEMORY_BASE_URL       # Agent Memory Service base URL
+AGENT_MEMORY_TOKEN_URL      # OAuth2 token endpoint
+AGENT_MEMORY_CLIENT_ID      # OAuth2 client ID
+AGENT_MEMORY_CLIENT_SECRET  # OAuth2 client secret
+```
+
+Constructor arguments take priority over environment variables when both are supplied.
 
 ## Support, Feedback, Contributing
 

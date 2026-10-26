@@ -1,5 +1,7 @@
 # Contributing
 
+This guide covers how to build, test, and contribute to `langgraph-checkpoint-sap-agent-memory`.
+
 ## Code of Conduct
 
 All members of the project community must abide by the [SAP Open Source Code of Conduct](https://github.com/SAP/.github/blob/main/CODE_OF_CONDUCT.md).
@@ -37,3 +39,160 @@ The following rule governs code contributions:
 * We use GitHub issues to track bugs and enhancement requests.
 
 * Please provide as much context as possible when you open an issue. The information you provide must be comprehensive enough to reproduce that issue for the assignee.
+
+---
+
+## Building and Testing
+
+### Prerequisites
+
+- Python 3.10, 3.11, or 3.12
+- [`uv`](https://docs.astral.sh/uv/) — used for environment and dependency management
+- [SAP Agent Memory Service](https://help.sap.com/docs/hana-cloud/sap-hana-cloud-agent-memory-service-guide/sap-hana-cloud-agent-memory-service-guide?locale=en-US) — for conformance tests
+
+---
+
+### Setup
+
+```bash
+# Clone and enter the repo
+git clone <repo-url>
+cd langgraph-checkpoint-sap-agent-memory
+
+# Create a virtual environment and install all dependencies (including dev)
+uv venv --python 3.12
+uv pip install -e ".[dev]"
+```
+
+---
+
+### Running checks
+
+All checks mirror what CI runs. Run them in this order before raising a PR:
+
+```bash
+# Lint
+uv run ruff check langgraph/ tests/
+uv run ruff format --check langgraph/ tests/
+
+# Type check
+uv run ty check langgraph/
+
+# Unit + serde tests (no network required)
+uv run pytest tests/ -k "not conformance" -v
+
+# Or run everything at once via make
+make check
+```
+
+#### Auto-fix formatting
+
+```bash
+uv run ruff format langgraph/ tests/
+```
+
+---
+
+### Commit messages
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/).
+The format is enforced by CI on every PR title and every push to `main`.
+
+```
+<type>(<scope>): <short description>
+
+[optional body]
+
+[optional footer — e.g. BREAKING CHANGE: ...]
+```
+
+**Allowed types:**
+
+| Type | When to use |
+|---|---|
+| `feat` | A new feature or capability |
+| `fix` | A bug fix |
+| `docs` | Documentation changes only |
+| `test` | Adding or updating tests |
+| `refactor` | Code change that is neither a fix nor a feature |
+| `chore` | Dependency updates, build config, tooling |
+| `ci` | Changes to GitHub Actions workflows |
+| `perf` | Performance improvements |
+
+**Examples:**
+
+```bash
+feat(checkpointer): add async list() support
+fix(http): retry on 503 responses
+docs: add conformance test setup to CONTRIBUTING
+ci: add concurrency controls to all workflows
+chore(deps): bump httpx to 0.28
+feat!: drop Python 3.9 support  # the ! signals a breaking change
+```
+
+**Scope** is optional but encouraged when the change is localised (e.g. `checkpointer`, `http`, `serde`, `deps`).
+
+**PR title** is what matters most — when you squash-merge, the PR title becomes the commit message on `main`.
+
+---
+
+### Test layout
+
+| File                         | What it covers                                                           |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `tests/test_checkpointer.py` | All `HanaAgentMemorySaver` methods — mocked HTTP via `respx`, no network |
+| `tests/test_serde.py`        | Base64 round-trip for every serialization type tag                       |
+| `tests/test_conformance.py`  | LangGraph conformance suite — requires a live Agent Memory Service       |
+
+#### Running conformance tests
+
+The conformance suite validates the full `BaseCheckpointSaver` contract. See the official docs:
+
+- [Testing with the conformance suite](https://docs.langchain.com/oss/python/langgraph/checkpointers#testing-with-the-conformance-suite) — LangGraph custom checkpointer guide
+
+To run them locally you need SAP Agent Memory Service. Set the following environment variables:
+
+```bash
+export AGENT_MEMORY_BASE_URL=https://<service-host>
+export AGENT_MEMORY_TOKEN_URL=https://<tenant>.authentication.<region>/oauth/token
+export AGENT_MEMORY_CLIENT_ID=<client-id>
+export AGENT_MEMORY_CLIENT_SECRET=<client-secret>
+
+uv run pytest tests/test_conformance.py -v -s
+```
+
+---
+
+### Project layout
+
+```
+langgraph/
+└── checkpoint/
+    └── sap/
+        └── agent_memory/
+            ├── __init__.py
+            ├── checkpointer.py
+            └── _http.py
+tests/
+    ├── test_checkpointer.py
+    ├── test_serde.py
+    └── test_conformance.py
+```
+
+---
+
+### Ruff rules
+
+Configured in `pyproject.toml`. Run `ruff check --help` for rule documentation.
+
+---
+
+### Adding a new dependency
+
+Stop and ask first. The dependency list is intentionally minimal:
+
+| Dependency                  | Reason                                                             |
+| --------------------------- | ------------------------------------------------------------------ |
+| `langgraph-checkpoint>=2.0` | `BaseCheckpointSaver`, `JsonPlusSerializer`                        |
+| `httpx>=0.27`               | Async HTTP client                                                  |
+| `uuid6>=2024.1`             | UUID v7 for `get_next_version()` — not in stdlib until Python 3.14 |

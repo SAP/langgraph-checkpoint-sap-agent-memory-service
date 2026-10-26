@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "langgraph-checkpoint-sap-agent-memory-service"
+version = "0.1.0"
+description = "LangGraph checkpointer backed by the SAP HANA Agent Memory Service"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    { name = "SAP SE", email = "ospo@sap.com" }
+]
+requires-python = ">=3.10"
+dependencies = ["langgraph-checkpoint>=2.0", "httpx>=0.27", "uuid6>=2024.1", "urllib3>=2.8.0"]
+
+[project.urls]
+source = "https://github.com/SAP/langgraph-checkpoint-sap-agent-memory-service"
+issues = "https://github.com/SAP/langgraph-checkpoint-sap-agent-memory-service/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+    "ruff",
+    "ty",
+    "langgraph-checkpoint-conformance",
+]
+
+[tool.hatch.build.targets.wheel]
+include = ["langgraph"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "I"]
+ignore = ["E501", "B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

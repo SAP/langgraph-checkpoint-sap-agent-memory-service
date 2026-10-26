@@ -1,0 +1,6 @@
+paths:
+  - langgraph
+  - tests
+paths-ignore:
+  - docs
+  - .github

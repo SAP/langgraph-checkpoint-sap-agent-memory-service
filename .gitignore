@@ -1,0 +1,30 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.ruff_cache/
+.pytest_cache/
+.ty_cache/
+.env
+.env.*
+!.env.example
+credentials.json
+secrets.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+
+# Local IDE configuration
+.vscode/
+.idea/
+
+# Local test and tool output
+.coverage
+htmlcov/

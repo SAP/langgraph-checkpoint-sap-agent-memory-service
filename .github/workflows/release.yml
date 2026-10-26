@@ -1,0 +1,126 @@
+name: Publish Package to PyPI
+
+# Fires when a GitHub Release is published (stable) or marked as pre-release.
+# Using [released, prereleased] rather than [published] is intentional: it avoids
+# firing on draft-to-published transitions from unrelated drafts, and allows
+# prepare-release.yaml (to be added later) to set the pre-release checkbox from the
+# version string before the maintainer clicks Publish.
+on:
+  release:
+    types: [released, prereleased]
+
+jobs:
+  publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # upload build artifacts to the GitHub Release
+      id-token: write  # OIDC trusted publisher — no stored PyPI token needed
+    environment: pypi:langgraph-checkpoint-sap-agent-memory-service
+
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Build distribution
+        run: uv build
+
+      - name: Verify build artifacts
+        run: |
+          wheel_count=$(ls -1 dist/*.whl 2>/dev/null | wc -l)
+          tar_count=$(ls -1 dist/*.tar.gz 2>/dev/null | wc -l)
+          [[ "$wheel_count" -ge 1 && "$tar_count" -ge 1 ]] || \
+            { echo "ERROR: Missing build artifacts (wheels: $wheel_count, sdists: $tar_count)"; exit 1; }
+          echo "Build artifacts: $wheel_count wheel(s), $tar_count sdist(s)"
+          ls -lh dist/
+
+      - name: Check tag version matches pyproject.toml
+        run: |
+          PKG_VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
+          TAG_VERSION="${RELEASE_TAG#v}"
+          if [[ "$PKG_VERSION" != "$TAG_VERSION" ]]; then
+            echo "ERROR: pyproject.toml version ($PKG_VERSION) does not match tag ($TAG_VERSION)."
+            echo "Bump pyproject.toml to $TAG_VERSION before creating the release."
+            exit 1
+          fi
+          echo "Version check passed: $PKG_VERSION == $TAG_VERSION"
+
+      - name: Check version is not already published on PyPI
+        run: |
+          PKG_NAME=$(grep '^name = ' pyproject.toml | cut -d'"' -f2)
+          VERSION="${RELEASE_TAG#v}"
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/$PKG_NAME/$VERSION/json")
+          if [[ "$HTTP" == "200" ]]; then
+            echo "ERROR: $PKG_NAME==$VERSION already exists on PyPI. Delete the tag and release before retrying."
+            exit 1
+          fi
+          echo "$PKG_NAME==$VERSION is not yet on PyPI — proceeding."
+
+      - name: Upload artifacts to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          upload_url=$(curl -sfL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['upload_url'].split('{')[0])")
+
+          for file in dist/*.whl dist/*.tar.gz; do
+            name=$(basename "$file")
+            echo "Uploading $name..."
+            curl -sfL -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Content-Type: application/octet-stream" \
+              "${upload_url}?name=${name}" \
+              --data-binary @"$file" > /dev/null
+          done
+          echo "Artifacts uploaded to release $RELEASE_TAG"
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@v1.14.2
+
+  notify-failure:
+    name: Notify failure
+    needs: [publish]
+    if: always() && needs.publish.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Append failure notice to release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          api="${{ github.api_url }}/repos/${{ github.repository }}/releases"
+
+          release=$(curl -sfL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "${api}/tags/${tag}")
+
+          release_id=$(echo "$release" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          current_body=$(echo "$release" | python3 -c "import json,sys; print(json.load(sys.stdin).get('body') or '')")
+
+          new_body=$(printf '%s\n\n---\n❌ **Release workflow failed.** Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details. The tag may need to be deleted before retrying.' \
+            "$current_body")
+
+          curl -sfL -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "${api}/${release_id}" \
+            -d "{\"body\": $(echo "$new_body" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")}" > /dev/null
+
+          echo "Failure notice appended to release $tag"
