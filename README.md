@@ -1,4 +1,6 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/SAP/langgraph-checkpoint-sap-agent-memory-service)](https://api.reuse.software/info/github.com/SAP/langgraph-checkpoint-sap-agent-memory-service)
+[![CI](https://github.com/SAP/langgraph-checkpoint-sap-agent-memory-service/actions/workflows/ci.yml/badge.svg)](https://github.com/SAP/langgraph-checkpoint-sap-agent-memory-service/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/SAP/langgraph-checkpoint-sap-agent-memory-service/actions/workflows/codeql.yml/badge.svg)](https://github.com/SAP/langgraph-checkpoint-sap-agent-memory-service/actions/workflows/codeql.yml)
 
 # LangGraph checkpointers for SAP Agent Memory Service
 
