@@ -70,21 +70,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          upload_url=$(curl -sfL \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "${{ github.api_url }}/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
-            | python3 -c "import json,sys; print(json.load(sys.stdin)['upload_url'].split('{')[0])")
-
-          for file in dist/*.whl dist/*.tar.gz; do
-            name=$(basename "$file")
-            echo "Uploading $name..."
-            curl -sfL -X POST \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Content-Type: application/octet-stream" \
-              "${upload_url}?name=${name}" \
-              --data-binary @"$file" > /dev/null
-          done
+          gh release upload "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --clobber \
+            dist/*.whl dist/*.tar.gz
           echo "Artifacts uploaded to release $RELEASE_TAG"
 
       - name: Publish to PyPI
@@ -104,23 +93,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ github.event.release.tag_name }}"
-          api="${{ github.api_url }}/repos/${{ github.repository }}/releases"
+          current_body=$(gh release view "$tag" \
+            --repo "${{ github.repository }}" \
+            --json body -q .body)
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          new_body=$(printf '%s\n\n---\n❌ **Release workflow failed.** Check the [workflow run](%s) for details. The tag may need to be deleted before retrying.' \
+            "$current_body" "$run_url")
 
-          release=$(curl -sfL \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "${api}/tags/${tag}")
-
-          release_id=$(echo "$release" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-          current_body=$(echo "$release" | python3 -c "import json,sys; print(json.load(sys.stdin).get('body') or '')")
-
-          new_body=$(printf '%s\n\n---\n❌ **Release workflow failed.** Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details. The tag may need to be deleted before retrying.' \
-            "$current_body")
-
-          curl -sfL -X PATCH \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "${api}/${release_id}" \
-            -d "{\"body\": $(echo "$new_body" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")}" > /dev/null
+          gh release edit "$tag" \
+            --repo "${{ github.repository }}" \
+            --notes "$new_body"
 
           echo "Failure notice appended to release $tag"
