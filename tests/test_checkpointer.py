@@ -11,7 +11,7 @@ import pytest
 import respx
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
-from langgraph.checkpoint.sap.agent_memory import HanaAgentMemorySaver
+from langgraph.checkpoint.sap.agent_memory import IAS, XSUAA, HanaAgentMemorySaver
 from langgraph.checkpoint.sap.agent_memory._http import (
     CachedToken,
     TokenFetcher,
@@ -38,9 +38,11 @@ _serde = JsonPlusSerializer()
 def _saver(**kwargs) -> HanaAgentMemorySaver:
     saver = HanaAgentMemorySaver(
         base_url=BASE_URL,
-        token_url=TOKEN_URL,
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
+        auth=XSUAA(
+            token_url=TOKEN_URL,
+            client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
+        ),
         **kwargs,
     )
     # Pre-seed token cache so tests never make a real token HTTP call.
@@ -67,7 +69,7 @@ def _ias_saver(monkeypatch, **kwargs) -> HanaAgentMemorySaver:
         "AGENT_MEMORY_CLIENT_SECRET",
     ):
         monkeypatch.delenv(var, raising=False)
-    saver = HanaAgentMemorySaver(base_url=BASE_URL, **kwargs)
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IAS(), **kwargs)
     saver._token_cache._token = "test-token"
     saver._token_cache._expires_at = time.monotonic() + 3600
     return saver
@@ -342,9 +344,11 @@ def test_put_sends_bearer_token_when_token_url_configured():
 
     saver = HanaAgentMemorySaver(
         base_url=BASE_URL,
-        token_url=TOKEN_URL,
-        client_id="my-client",
-        client_secret="my-secret",
+        auth=XSUAA(
+            token_url=TOKEN_URL,
+            client_id="my-client",
+            client_secret="my-secret",
+        ),
     )
     checkpoint = {
         "id": SNAPSHOT_ID,
@@ -1646,25 +1650,39 @@ _ALL_REQUIRED_ENVS = {
 
 
 def test_init_raises_when_any_credential_missing(monkeypatch):
-    """All four credentials are required — missing any raises ValueError."""
+    """XSUAA: all three XSUAA creds required — missing any raises ValueError."""
     for missing_var in _ALL_REQUIRED_ENVS:
+        if missing_var == "AGENT_MEMORY_BASE_URL":
+            continue  # base_url missing is a separate error path
         for var, val in _ALL_REQUIRED_ENVS.items():
             monkeypatch.setenv(var, val)
         monkeypatch.delenv(missing_var)
         with pytest.raises(ValueError, match=missing_var.replace("AGENT_MEMORY_", "")):
-            HanaAgentMemorySaver()
+            HanaAgentMemorySaver(auth=XSUAA())
+
+
+def test_init_requires_auth():
+    """auth is a required keyword — omitting it raises TypeError."""
+    with pytest.raises(TypeError):
+        HanaAgentMemorySaver(base_url=BASE_URL)  # type: ignore[call-arg]
+
+
+def test_init_rejects_non_auth_object():
+    """auth must be an IAS()/XSUAA() instance — a bare string is rejected."""
+    with pytest.raises(ValueError, match="must be an IAS\\(\\) or XSUAA\\(\\)"):
+        HanaAgentMemorySaver(base_url=BASE_URL, auth="XSUAA")  # type: ignore[arg-type]
 
 
 def test_init_uses_all_env_credentials(monkeypatch):
-    """All four credentials resolve from env vars when no args are passed."""
+    """XSUAA creds resolve from env vars when no cred args are passed."""
     for var, val in _ALL_REQUIRED_ENVS.items():
         monkeypatch.setenv(var, val)
-    saver = HanaAgentMemorySaver()
+    saver = HanaAgentMemorySaver(auth=XSUAA())
     assert saver._base == BASE_URL.rstrip("/")
 
 
 def test_init_explicit_args_win_over_env(monkeypatch):
-    """Explicit constructor args take priority over env vars."""
+    """Explicit XSUAA(...) args take priority over env vars."""
     other_url = "https://from-env.example"
     monkeypatch.setenv("AGENT_MEMORY_BASE_URL", other_url)
     monkeypatch.setenv("AGENT_MEMORY_TOKEN_URL", "https://from-env.example/token")
@@ -1672,9 +1690,11 @@ def test_init_explicit_args_win_over_env(monkeypatch):
     monkeypatch.setenv("AGENT_MEMORY_CLIENT_SECRET", "env-client-secret")
     saver = HanaAgentMemorySaver(
         base_url=BASE_URL,
-        token_url=TOKEN_URL,
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
+        auth=XSUAA(
+            token_url=TOKEN_URL,
+            client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
+        ),
     )
     assert saver._base == BASE_URL.rstrip("/")
 
@@ -1685,55 +1705,52 @@ def test_init_explicit_args_win_over_env(monkeypatch):
 
 
 def test_init_base_url_only_allowed():
-    """Should succeed with only base_url — IAS mode requires no XSUAA creds."""
-    saver = HanaAgentMemorySaver(base_url=BASE_URL)
+    """IAS() with only base_url succeeds — IAS requires no XSUAA creds."""
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IAS())
     assert saver._base == BASE_URL.rstrip("/")
 
 
-def test_init_partial_xsuaa_creds_raises():
-    """Providing only some XSUAA creds (token_url without client_id/secret) should raise."""
-    with pytest.raises(ValueError, match="partial XSUAA credentials"):
-        HanaAgentMemorySaver(base_url=BASE_URL, token_url=TOKEN_URL)
-
-
-def test_init_explicit_base_url_only_is_ias_even_with_xsuaa_env_vars(monkeypatch):
-    """Rule 1: explicit base_url alone → IAS, even when XSUAA env vars are present.
-
-    Ambient env vars must not silently flip the auth mode when the caller
-    passed only base_url.  This is the key no-cross-layer-mixing guarantee.
-    """
-    monkeypatch.setenv("AGENT_MEMORY_TOKEN_URL", TOKEN_URL)
-    monkeypatch.setenv("AGENT_MEMORY_CLIENT_ID", CLIENT_ID)
-    monkeypatch.setenv("AGENT_MEMORY_CLIENT_SECRET", CLIENT_SECRET)
-
-    saver = HanaAgentMemorySaver(base_url=BASE_URL)
-
-    assert saver._is_ias is True
-
-
-def test_init_env_base_url_only_is_ias(monkeypatch):
-    """Rule 3 (IAS branch): only AGENT_MEMORY_BASE_URL in env → IAS mode."""
-    monkeypatch.setenv("AGENT_MEMORY_BASE_URL", BASE_URL)
+def test_init_partial_xsuaa_creds_raises(monkeypatch):
+    """XSUAA() with only some creds resolving should raise."""
     for var in (
         "AGENT_MEMORY_TOKEN_URL",
         "AGENT_MEMORY_CLIENT_ID",
         "AGENT_MEMORY_CLIENT_SECRET",
     ):
         monkeypatch.delenv(var, raising=False)
+    with pytest.raises(ValueError, match="XSUAA requires"):
+        HanaAgentMemorySaver(base_url=BASE_URL, auth=XSUAA(token_url=TOKEN_URL))
 
-    saver = HanaAgentMemorySaver()
 
+def test_init_ias_default_token(monkeypatch):
+    """IAS(ias_access_token=...) sets a default token on the saver."""
+    monkeypatch.delenv("AGENT_MEMORY_IAS_ACCESS_TOKEN", raising=False)
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IAS(ias_access_token="tok"))
+    assert saver._default_ias_token == "tok"
+
+
+def test_init_ias_default_token_from_env(monkeypatch):
+    """IAS() falls back to AGENT_MEMORY_IAS_ACCESS_TOKEN for its default token."""
+    monkeypatch.setenv("AGENT_MEMORY_IAS_ACCESS_TOKEN", "env-tok")
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IAS())
+    assert saver._default_ias_token == "env-tok"
+
+
+def test_init_ias_only_base_url(monkeypatch):
+    """IAS() with only AGENT_MEMORY_BASE_URL in env → IAS mode."""
+    monkeypatch.setenv("AGENT_MEMORY_BASE_URL", BASE_URL)
+    saver = HanaAgentMemorySaver(auth=IAS())
     assert saver._is_ias is True
 
 
 def test_init_env_all_xsuaa_creds_is_xsuaa(monkeypatch):
-    """Rule 3 (XSUAA branch): all four AGENT_MEMORY_* env vars set → XSUAA mode."""
+    """XSUAA() with all four AGENT_MEMORY_* env vars set → XSUAA mode."""
     monkeypatch.setenv("AGENT_MEMORY_BASE_URL", BASE_URL)
     monkeypatch.setenv("AGENT_MEMORY_TOKEN_URL", TOKEN_URL)
     monkeypatch.setenv("AGENT_MEMORY_CLIENT_ID", CLIENT_ID)
     monkeypatch.setenv("AGENT_MEMORY_CLIENT_SECRET", CLIENT_SECRET)
 
-    saver = HanaAgentMemorySaver()
+    saver = HanaAgentMemorySaver(auth=XSUAA())
 
     assert saver._is_ias is False
 
@@ -1838,7 +1855,7 @@ def test_ias_only_saver_without_ias_access_token_raises(monkeypatch):
         "AGENT_MEMORY_CLIENT_SECRET",
     ):
         monkeypatch.delenv(var, raising=False)
-    saver = HanaAgentMemorySaver(base_url=BASE_URL)
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IAS())
     config = {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": SNAPSHOT_SCOPE}}
 
     with pytest.raises(ValueError, match="hana-agent-memory-serverless"):
@@ -1918,7 +1935,7 @@ def test_delete_thread_ias_only_saver_without_token_raises(monkeypatch):
         "AGENT_MEMORY_CLIENT_SECRET",
     ):
         monkeypatch.delenv(var, raising=False)
-    saver = HanaAgentMemorySaver(base_url=BASE_URL)
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IAS())
 
     with pytest.raises(ValueError, match="hana-agent-memory-serverless"):
         saver.delete_thread(THREAD_ID)
@@ -1947,7 +1964,7 @@ async def test_adelete_thread_ias_only_saver_without_token_raises(monkeypatch):
         "AGENT_MEMORY_CLIENT_SECRET",
     ):
         monkeypatch.delenv(var, raising=False)
-    saver = HanaAgentMemorySaver(base_url=BASE_URL)
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IAS())
 
     with pytest.raises(ValueError, match="hana-agent-memory-serverless"):
         await saver.adelete_thread(THREAD_ID)

@@ -73,17 +73,70 @@ def _escape_odata_string(value: str) -> str:
     return value.replace("'", "''")
 
 
+class IAS:
+    """IAS auth mode: Bearer token for the request.
+
+    A default token may be set here via ``ias_access_token`` (falling back to
+    the ``AGENT_MEMORY_IAS_ACCESS_TOKEN`` env var). A per-request token supplied
+    through ``config["configurable"]["ias_access_token"]`` overrides it.
+    """
+
+    def __init__(self, ias_access_token: str | None = None) -> None:
+        self.ias_access_token = ias_access_token or os.getenv(
+            "AGENT_MEMORY_IAS_ACCESS_TOKEN"
+        )
+
+
+class XSUAA:
+    """XSUAA auth mode: OAuth2 ``client_credentials`` flow.
+
+    Each of ``token_url``/``client_id``/``client_secret`` falls back to the
+    corresponding ``AGENT_MEMORY_*`` env var when left ``None``. All three must
+    resolve (via arg or env) — the saver raises otherwise.
+    """
+
+    def __init__(
+        self,
+        token_url: str | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+    ) -> None:
+        self.token_url = token_url or os.getenv("AGENT_MEMORY_TOKEN_URL")
+        self.client_id = client_id or os.getenv("AGENT_MEMORY_CLIENT_ID")
+        self.client_secret = client_secret or os.getenv("AGENT_MEMORY_CLIENT_SECRET")
+
+    def _missing(self) -> list[str]:
+        """Return the names of credentials that did not resolve."""
+        return [
+            name
+            for name, value in (
+                ("token_url / AGENT_MEMORY_TOKEN_URL", self.token_url),
+                ("client_id / AGENT_MEMORY_CLIENT_ID", self.client_id),
+                ("client_secret / AGENT_MEMORY_CLIENT_SECRET", self.client_secret),
+            )
+            if not value
+        ]
+
+
 class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
     """LangGraph checkpoint saver backed by the SAP HANA Agent Memory Service.
 
     ``tenant_id`` and ``ias_access_token`` are passed per-invocation via
     ``config["configurable"]`` for multi-tenant and IAS-authenticated routing::
 
+        from langgraph.checkpoint.sap.agent_memory import (
+            HanaAgentMemorySaver,
+            IAS,
+            XSUAA,
+        )
+
         saver = HanaAgentMemorySaver(
             base_url="https://<service-host>",
-            token_url="https://<tenant>.authentication.<region>/oauth/token",
-            client_id="<client-id>",
-            client_secret="<client-secret>",
+            auth=XSUAA(
+                token_url="https://<tenant>.authentication.<region>/oauth/token",
+                client_id="<client-id>",
+                client_secret="<client-secret>",
+            ),
         )
         graph = builder.compile(checkpointer=saver)
 
@@ -96,112 +149,93 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         }
         result = await graph.ainvoke({"messages": [...]}, config=config)
 
-    **Saver kind is fixed at construction and immutable:**
+    **Saver kind is declared at construction and immutable:**
 
-    The saver is either an **IAS saver** or a **XSUAA saver** depending on
-    the credentials supplied to the constructor. This cannot change at runtime.
+    The saver is either an **IAS saver** or a **XSUAA saver** depending on the
+    ``auth`` instance supplied to the constructor. This cannot change at runtime.
 
-    - ``HanaAgentMemorySaver(base_url=...)`` — **IAS saver**: no XSUAA
-      credentials. Each request must supply ``ias_access_token`` in
-      ``config["configurable"]``; the token is used as a Bearer token directly.
-    - ``HanaAgentMemorySaver(base_url, token_url, client_id, client_secret)``
-      — **XSUAA saver**: ``client_credentials`` flow. Any ``ias_access_token`` in
-      ``config["configurable"]`` is ignored. Optionally pass ``tenant_id`` for
-      multi-tenant routing (omitting it uses the provider tenant with a warning).
+    - ``HanaAgentMemorySaver(base_url=..., auth=IAS())`` — **IAS saver**: the
+      Bearer token is supplied per request via ``ias_access_token`` in
+      ``config["configurable"]``. ``IAS(ias_access_token=...)`` may set a default
+      token (overridden per request).
+    - ``HanaAgentMemorySaver(base_url=..., auth=XSUAA(token_url=..., client_id=...,
+      client_secret=...))`` — **XSUAA saver**: ``client_credentials`` flow. Any
+      ``ias_access_token`` in ``config["configurable"]`` is ignored. Optionally pass
+      ``tenant_id`` for multi-tenant routing (omitting it uses the provider tenant).
 
     **Tenant routing (XSUAA savers only):**
 
     Pass ``tenant_id`` in ``config["configurable"]`` to route the token request
     with an ``x-zid`` header for that BTP subaccount zone ID.
 
-    Credentials are resolved hierarchically: explicit constructor arguments take
-    priority; any ``None`` parameter falls back to the corresponding environment
-    variable:
+    Credentials fall back to environment variables when left ``None``:
 
     - ``AGENT_MEMORY_BASE_URL``    → ``base_url``
-    - ``AGENT_MEMORY_TOKEN_URL``   → ``token_url``
-    - ``AGENT_MEMORY_CLIENT_ID``   → ``client_id``
-    - ``AGENT_MEMORY_CLIENT_SECRET`` → ``client_secret``
+    - ``AGENT_MEMORY_TOKEN_URL``   → ``XSUAA(token_url=...)``
+    - ``AGENT_MEMORY_CLIENT_ID``   → ``XSUAA(client_id=...)``
+    - ``AGENT_MEMORY_CLIENT_SECRET`` → ``XSUAA(client_secret=...)``
+    - ``AGENT_MEMORY_IAS_ACCESS_TOKEN`` → ``IAS(ias_access_token=...)``
 
-    ``base_url`` is always required. XSUAA credentials are all-or-none: omit all
-    three for IAS-only deployments, or provide all three for XSUAA::
+    ``base_url`` and ``auth`` are always required. ``XSUAA`` requires all three
+    credentials to resolve (via arg or env) and raises otherwise::
 
-        saver = HanaAgentMemorySaver()  # reads all from env vars
+        saver = HanaAgentMemorySaver(auth=XSUAA())  # reads base_url + creds from env
     """
 
     def __init__(
         self,
         base_url: str | None = None,
         *,
-        token_url: str | None = None,
-        client_id: str | None = None,
-        client_secret: str | None = None,
+        auth: IAS | XSUAA,
         timeout: float = 30.0,
         serde: Any | None = None,
     ) -> None:
         """Initialise the saver.
 
-        Credentials are resolved hierarchically: explicit arguments win;
-        ``None`` parameters fall back to environment variables.
+        The auth flow is declared explicitly via ``auth`` — an :class:`IAS` or
+        :class:`XSUAA` instance — and fixed for the saver's lifetime. It is never
+        inferred.
 
-        ``base_url`` is always required. XSUAA credentials (``token_url``,
-        ``client_id``, ``client_secret``) are optional — omit all three for IAS
-        mode, where the per-request token is passed via
-        ``config["configurable"]["ias_access_token"]``. If any XSUAA credential is
-        provided, all three must be present.
+        ``base_url`` is always required; it falls back to ``AGENT_MEMORY_BASE_URL``
+        when ``None``. XSUAA credentials live on the :class:`XSUAA` instance and
+        each falls back to its ``AGENT_MEMORY_*`` env var.
 
         Args:
             base_url: Agent Memory Service base URL, e.g.
                 ``"https://<service-host>"``. Falls back to
                 ``AGENT_MEMORY_BASE_URL`` env var.
-            token_url: OAuth2 token endpoint (``client_credentials`` grant).
-                Falls back to ``AGENT_MEMORY_TOKEN_URL``.
-            client_id: OAuth2 client ID. Falls back to
-                ``AGENT_MEMORY_CLIENT_ID``.
-            client_secret: OAuth2 client secret. Falls back to
-                ``AGENT_MEMORY_CLIENT_SECRET``.
+            auth: ``IAS()`` or ``XSUAA(token_url=..., client_id=...,
+                client_secret=...)`` — the auth flow for this saver. Required.
             timeout: HTTP request timeout in seconds. Default ``30.0``.
             serde: Custom serializer. Defaults to ``JsonPlusSerializer``.
         """
-        # Source-layer resolution: explicit kwargs win as a unit; env vars are
-        # consulted only when no explicit base_url is provided.  Never mix
-        # sources — that would allow ambient env vars to silently flip the auth
-        # mode when a caller passes only base_url (Rule 1: base_url-only = IAS).
-        if base_url:
-            resolved_base_url = base_url
-            resolved_token_url = token_url
-            resolved_client_id = client_id
-            resolved_client_secret = client_secret
-        else:
-            resolved_base_url = os.getenv("AGENT_MEMORY_BASE_URL")
-            resolved_token_url = os.getenv("AGENT_MEMORY_TOKEN_URL")
-            resolved_client_id = os.getenv("AGENT_MEMORY_CLIENT_ID")
-            resolved_client_secret = os.getenv("AGENT_MEMORY_CLIENT_SECRET")
-
+        resolved_base_url = base_url or os.getenv("AGENT_MEMORY_BASE_URL")
         if not resolved_base_url:
             raise ValueError(
                 "HanaAgentMemorySaver requires base_url / AGENT_MEMORY_BASE_URL."
             )
 
-        xsuaa_creds = (resolved_token_url, resolved_client_id, resolved_client_secret)
-        self._is_ias = not all(xsuaa_creds)  # True = IAS-only binding, False = XSUAA
-        if any(xsuaa_creds) and not all(xsuaa_creds):
-            missing = [
-                name
-                for name, value in (
-                    ("token_url / AGENT_MEMORY_TOKEN_URL", resolved_token_url),
-                    ("client_id / AGENT_MEMORY_CLIENT_ID", resolved_client_id),
-                    (
-                        "client_secret / AGENT_MEMORY_CLIENT_SECRET",
-                        resolved_client_secret,
-                    ),
+        if isinstance(auth, XSUAA):
+            self._is_ias = False
+            self._default_ias_token = None
+            missing = auth._missing()
+            if missing:
+                raise ValueError(
+                    "HanaAgentMemorySaver: XSUAA requires token_url, client_id, "
+                    "client_secret (via args or AGENT_MEMORY_* env vars): "
+                    + ", ".join(missing)
                 )
-                if not value
-            ]
+            resolved_token_url = auth.token_url
+            resolved_client_id = auth.client_id
+            resolved_client_secret = auth.client_secret
+        elif isinstance(auth, IAS):
+            self._is_ias = True
+            self._default_ias_token = auth.ias_access_token
+            resolved_token_url = resolved_client_id = resolved_client_secret = None
+        else:
             raise ValueError(
-                "HanaAgentMemorySaver: partial XSUAA credentials provided — "
-                "all three (token_url, client_id, client_secret) must be set together: "
-                + ", ".join(missing)
+                "HanaAgentMemorySaver: auth must be an IAS() or XSUAA() instance, "
+                f"got {type(auth).__name__}."
             )
 
         logger.info(
@@ -373,7 +407,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         """
         if self._is_ias:
             raw = cfg.get("ias_access_token")
-            ias_access_token = raw.strip() if raw else None
+            ias_access_token = (raw.strip() if raw else None) or self._default_ias_token
             if not ias_access_token:
                 raise ValueError(
                     "No auth available: this saver was constructed with the "
@@ -918,7 +952,10 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             thread_id,
         )
         if self._is_ias:
-            if not (ias_access_token and ias_access_token.strip()):
+            ias_access_token = (
+                ias_access_token and ias_access_token.strip()
+            ) or self._default_ias_token
+            if not ias_access_token:
                 raise ValueError(
                     "No auth available: this saver was constructed with the "
                     "hana-agent-memory-serverless plan, so an IAS token is "
@@ -1300,7 +1337,10 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         # See delete_thread() for the 404-as-idempotent-success pattern.
         logger.debug("DELETE thread (async): thread_id=%s", thread_id)
         if self._is_ias:
-            if not (ias_access_token and ias_access_token.strip()):
+            ias_access_token = (
+                ias_access_token and ias_access_token.strip()
+            ) or self._default_ias_token
+            if not ias_access_token:
                 raise ValueError(
                     "No auth available: this saver was constructed with the "
                     "hana-agent-memory-serverless plan, so an IAS token is "

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from langgraph.checkpoint.conformance import checkpointer_test, validate
 
-from langgraph.checkpoint.sap.agent_memory import HanaAgentMemorySaver
+from langgraph.checkpoint.sap.agent_memory import IAS, XSUAA, HanaAgentMemorySaver
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("AGENT_MEMORY_BASE_URL"),
@@ -24,11 +24,17 @@ async def hana_checkpointer() -> AsyncGenerator[HanaAgentMemorySaver, None]:
     Tracks all thread_ids created during tests and cleans them up afterward
     to prevent data accumulation across test runs.
     """
+    _has_xsuaa = all(
+        os.environ.get(v)
+        for v in (
+            "AGENT_MEMORY_TOKEN_URL",
+            "AGENT_MEMORY_CLIENT_ID",
+            "AGENT_MEMORY_CLIENT_SECRET",
+        )
+    )
     saver = HanaAgentMemorySaver(
         base_url=os.environ["AGENT_MEMORY_BASE_URL"],
-        token_url=os.environ.get("AGENT_MEMORY_TOKEN_URL"),
-        client_id=os.environ.get("AGENT_MEMORY_CLIENT_ID"),
-        client_secret=os.environ.get("AGENT_MEMORY_CLIENT_SECRET"),
+        auth=XSUAA() if _has_xsuaa else IAS(),
     )
 
     created_threads: set[str] = set()
