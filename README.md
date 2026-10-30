@@ -18,8 +18,8 @@ Supports conversation continuity, crash recovery, human-in-the-loop (HITL) pause
 ### Installation
 
 ```bash
-pip install langgraph-checkpoint-sap-agent-memory        # Using pip
-uv add langgraph-checkpoint-sap-agent-memory             # Using uv
+pip install langgraph-checkpoint-sap-agent-memory-service        # Using pip
+uv add langgraph-checkpoint-sap-agent-memory-service             # Using uv
 
 ```
 
@@ -31,9 +31,9 @@ Declare the auth flow explicitly with `auth=`. For XSUAA, credentials fall back 
 `AGENT_MEMORY_*` env vars when omitted:
 
 ```python
-from langgraph.checkpoint.sap.agent_memory import HanaAgentMemorySaver, XSUAA
+from langgraph.checkpoint.sap.agent_memory import HanaAgentMemorySaver, XsuaaAuth
 
-saver = HanaAgentMemorySaver(auth=XSUAA())
+saver = HanaAgentMemorySaver(auth=XsuaaAuth())
 graph = builder.compile(checkpointer=saver)
 
 # First run — checkpoints are saved automatically at each node boundary
@@ -49,7 +49,7 @@ result = await graph.ainvoke(
 )
 ```
 
-`XSUAA()` reads `AGENT_MEMORY_TOKEN_URL`, `AGENT_MEMORY_CLIENT_ID`, and
+`XsuaaAuth()` reads `AGENT_MEMORY_TOKEN_URL`, `AGENT_MEMORY_CLIENT_ID`, and
 `AGENT_MEMORY_CLIENT_SECRET`; `base_url` reads `AGENT_MEMORY_BASE_URL`.
 See [Environment variables](#environment-variables) for details.
 
@@ -58,11 +58,11 @@ See [Environment variables](#environment-variables) for details.
 Pass credentials directly inside the auth object if you prefer explicit configuration:
 
 ```python
-from langgraph.checkpoint.sap.agent_memory import HanaAgentMemorySaver, XSUAA
+from langgraph.checkpoint.sap.agent_memory import HanaAgentMemorySaver, XsuaaAuth
 
 saver = HanaAgentMemorySaver(
     base_url="https://<service-host>",
-    auth=XSUAA(
+    auth=XsuaaAuth(
         token_url="https://<tenant>.authentication.<region>/oauth/token",
         client_id="<client-id>",
         client_secret="<client-secret>",
@@ -73,15 +73,15 @@ graph = builder.compile(checkpointer=saver)
 
 #### IAS (serverless) plan
 
-For the `hana-agent-memory-serverless` plan, declare `auth=IAS()` and pass a Bearer
-token per request via `config["configurable"]["ias_access_token"]` (an optional
-default token may be set on `IAS(ias_access_token=...)`, falling back to
-`AGENT_MEMORY_IAS_ACCESS_TOKEN`):
+For the `hana-agent-memory-serverless` plan, declare `auth=IASAuth()`. Pass a Bearer token
+per request via `config["configurable"]["ias_access_token"]`, or set a default token
+(string or callable) on `IASAuth(ias_access_token=...)`:
 
 ```python
-from langgraph.checkpoint.sap.agent_memory import HanaAgentMemorySaver, IAS
+from langgraph.checkpoint.sap.agent_memory import HanaAgentMemorySaver, IASAuth
 
-saver = HanaAgentMemorySaver(base_url="https://<service-host>", auth=IAS())
+# Option 1: per-request string token
+saver = HanaAgentMemorySaver(base_url="https://<service-host>", auth=IASAuth())
 graph = builder.compile(checkpointer=saver)
 
 result = await graph.ainvoke(
@@ -89,6 +89,26 @@ result = await graph.ainvoke(
     config={"configurable": {"thread_id": "trip-001", "ias_access_token": "<token>"}},
 )
 ```
+
+```python
+# Option 2: callable token — fetched once and re-fetched automatically after a 401
+def get_ias_token() -> str:
+    return fetch_token_from_credential_store()  # your token logic here
+
+saver = HanaAgentMemorySaver(
+    base_url="https://<service-host>",
+    auth=IASAuth(ias_access_token=get_ias_token),
+)
+graph = builder.compile(checkpointer=saver)
+
+# No ias_access_token in config — the callable is invoked automatically
+result = await graph.ainvoke(
+    {"messages": [HumanMessage("Plan my trip to Paris")]},
+    config={"configurable": {"thread_id": "trip-001"}},
+)
+```
+
+Async functions and callable objects are supported by async saver methods; see [IAS token refresh](#ias-token-refresh) for execution and identity scope.
 
 ## Common usage patterns
 
@@ -122,6 +142,41 @@ graph.invoke(initial_state, config)
 graph.invoke(Command(resume={"approved": True}), config)
 ```
 
+### IAS token refresh
+
+- **String token**: used directly. A 401 is returned without a refresh attempt.
+- **Callable**: fetched on first use and refreshed after a 401. Concurrent calls
+  share one refresh; a delayed 401 cannot invalidate a newer token. Each request
+  gets at most one authentication retry. Failed acquisition can be retried.
+- **Per-request override** via `config["configurable"]["ias_access_token"]`
+  uses its own cache. Missing or space-only overrides select the default.
+  Tokens must be nonempty strings without internal whitespace or control
+  characters; surrounding spaces are removed.
+
+A default IAS source must represent **one stable authenticated principal**.
+For different users, pass authenticated tokens per request or use separate savers.
+`tenant_id` routes XSUAA requests only; it does not partition the IAS default cache.
+
+Async saver methods support async functions, objects with async `__call__`,
+and callbacks returning awaitables. Synchronous callbacks run in a worker with
+context variables preserved. Callbacks needing an event loop during invocation
+should use `async def`. Use async saver methods for async-only providers.
+
+`timeout` applies to HTTP requests. IAS callbacks must set their own I/O
+timeouts. Cancelling an async caller does not cancel a shared refresh; keep its
+event loop alive until that refresh finishes.
+
+```python
+# Sync callable
+auth=IASAuth(ias_access_token=lambda: my_token_service.get_token())
+
+# Async callable
+async def get_token() -> str:
+    return await my_async_token_service.get_token()
+
+auth=IASAuth(ias_access_token=get_token)
+```
+
 ## State history
 
 ```python
@@ -140,17 +195,17 @@ Nested subgraphs work without any extra configuration. LangGraph sets `checkpoin
 ### `HanaAgentMemorySaver`
 
 The auth flow is declared explicitly via the required `auth=` argument, which takes
-either an `XSUAA(...)` or `IAS(...)` object. Credentials live inside that object and
+either an `XsuaaAuth(...)` or `IASAuth(...)` object. Credentials live inside that object and
 each can be supplied as an argument, an environment variable, or both (argument wins).
 
 | Parameter  | Type                         | Environment variable    | Default              | Description                                          |
 | ---------- | ---------------------------- | ----------------------- | -------------------- | ---------------------------------------------------- |
 | `base_url` | `str \| None`                | `AGENT_MEMORY_BASE_URL` | —                    | Agent Memory Service base URL, e.g. `https://<host>` |
-| `auth`     | `XSUAA \| IAS`               | —                       | — (required)         | Auth flow declaration (see below)                    |
+| `auth`     | `XsuaaAuth \| IASAuth`       | —                       | — (required)         | Auth flow declaration (see below)                    |
 | `timeout`  | `float`                      | —                       | `30.0`               | HTTP request timeout in seconds                      |
 | `serde`    | `SerializerProtocol \| None` | —                       | `JsonPlusSerializer` | Custom serializer for checkpoint state               |
 
-**`XSUAA(token_url=..., client_id=..., client_secret=...)`** — OAuth2 `client_credentials` flow:
+**`XsuaaAuth(token_url=..., client_id=..., client_secret=...)`** — OAuth2 `client_credentials` flow:
 
 | Parameter       | Type          | Environment variable         | Description               |
 | --------------- | ------------- | ---------------------------- | ------------------------- |
@@ -158,11 +213,11 @@ each can be supplied as an argument, an environment variable, or both (argument 
 | `client_id`     | `str \| None` | `AGENT_MEMORY_CLIENT_ID`     | OAuth2 client ID          |
 | `client_secret` | `str \| None` | `AGENT_MEMORY_CLIENT_SECRET` | OAuth2 client secret      |
 
-**`IAS(ias_access_token=...)`** — per-request Bearer token (`hana-agent-memory-serverless`):
+**`IASAuth(ias_access_token=...)`** — per-request Bearer token (`hana-agent-memory-serverless`):
 
 | Parameter          | Type          | Environment variable              | Description                                                         |
 | ------------------ | ------------- | --------------------------------- | ------------------------------------------------------------------- |
-| `ias_access_token` | `str \| None` | `AGENT_MEMORY_IAS_ACCESS_TOKEN`   | Optional default token; `config["configurable"]["ias_access_token"]` overrides it per request |
+| `ias_access_token` | `str \| Callable \| None` | `AGENT_MEMORY_IAS_ACCESS_TOKEN`   | Token string, sync callable, or async callable. Callable is invoked lazily and re-invoked after a 401. `config["configurable"]["ias_access_token"]` overrides per request. Env var only accepts a string. |
 
 ### Environment variables
 
@@ -174,7 +229,7 @@ AGENT_MEMORY_CLIENT_SECRET     # XSUAA: OAuth2 client secret
 AGENT_MEMORY_IAS_ACCESS_TOKEN  # IAS: default Bearer token (optional)
 ```
 
-Constructor/auth-object arguments take priority over environment variables when both are supplied.
+Environment variables are consulted only for arguments left as None. Explicit empty credentials are rejected; they do not select environment credentials.
 
 ## Support, Feedback, Contributing
 

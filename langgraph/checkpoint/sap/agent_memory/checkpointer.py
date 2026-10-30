@@ -26,12 +26,16 @@ from uuid6 import uuid7
 
 from langgraph.checkpoint.sap.agent_memory._http import (
     CachedToken,
+    IASTokenFetcher,
     RetryClient,
     SyncRetryClient,
-    TokenFetcher,
     TokenRegistry,
+    XSUAATokenFetcher,
+    _IASTokenSource,
     collect_all_pages_async,
     collect_all_pages_sync,
+    optional_ias_token,
+    validate_token,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,21 +77,32 @@ def _escape_odata_string(value: str) -> str:
     return value.replace("'", "''")
 
 
-class IAS:
+class IASAuth:
     """IAS auth mode: Bearer token for the request.
 
     A default token may be set here via ``ias_access_token`` (falling back to
     the ``AGENT_MEMORY_IAS_ACCESS_TOKEN`` env var). A per-request token supplied
     through ``config["configurable"]["ias_access_token"]`` overrides it.
+
+    ``ias_access_token`` accepts a plain string, a sync callable ``() -> str``,
+    or an async callable ``() -> Awaitable[str]`` — the callable is invoked
+    lazily on first use and again after a 401 to refresh the token. A default
+    source represents one stable principal; it must not select different users
+    from request-local context. Use per-request tokens for multiple identities.
     """
 
-    def __init__(self, ias_access_token: str | None = None) -> None:
-        self.ias_access_token = ias_access_token or os.getenv(
-            "AGENT_MEMORY_IAS_ACCESS_TOKEN"
+    def __init__(self, ias_access_token: _IASTokenSource | None = None) -> None:
+        source = (
+            os.getenv("AGENT_MEMORY_IAS_ACCESS_TOKEN")
+            if ias_access_token is None
+            else ias_access_token
+        )
+        self.ias_access_token = (
+            source if source is None or callable(source) else validate_token(source)
         )
 
 
-class XSUAA:
+class XsuaaAuth:
     """XSUAA auth mode: OAuth2 ``client_credentials`` flow.
 
     Each of ``token_url``/``client_id``/``client_secret`` falls back to the
@@ -101,9 +116,17 @@ class XSUAA:
         client_id: str | None = None,
         client_secret: str | None = None,
     ) -> None:
-        self.token_url = token_url or os.getenv("AGENT_MEMORY_TOKEN_URL")
-        self.client_id = client_id or os.getenv("AGENT_MEMORY_CLIENT_ID")
-        self.client_secret = client_secret or os.getenv("AGENT_MEMORY_CLIENT_SECRET")
+        self.token_url = (
+            os.getenv("AGENT_MEMORY_TOKEN_URL") if token_url is None else token_url
+        )
+        self.client_id = (
+            os.getenv("AGENT_MEMORY_CLIENT_ID") if client_id is None else client_id
+        )
+        self.client_secret = (
+            os.getenv("AGENT_MEMORY_CLIENT_SECRET")
+            if client_secret is None
+            else client_secret
+        )
 
     def _missing(self) -> list[str]:
         """Return the names of credentials that did not resolve."""
@@ -114,7 +137,7 @@ class XSUAA:
                 ("client_id / AGENT_MEMORY_CLIENT_ID", self.client_id),
                 ("client_secret / AGENT_MEMORY_CLIENT_SECRET", self.client_secret),
             )
-            if not value
+            if not isinstance(value, str) or not value.strip()
         ]
 
 
@@ -126,13 +149,13 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
 
         from langgraph.checkpoint.sap.agent_memory import (
             HanaAgentMemorySaver,
-            IAS,
-            XSUAA,
+            IASAuth,
+            XsuaaAuth,
         )
 
         saver = HanaAgentMemorySaver(
             base_url="https://<service-host>",
-            auth=XSUAA(
+            auth=XsuaaAuth(
                 token_url="https://<tenant>.authentication.<region>/oauth/token",
                 client_id="<client-id>",
                 client_secret="<client-secret>",
@@ -154,11 +177,11 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
     The saver is either an **IAS saver** or a **XSUAA saver** depending on the
     ``auth`` instance supplied to the constructor. This cannot change at runtime.
 
-    - ``HanaAgentMemorySaver(base_url=..., auth=IAS())`` — **IAS saver**: the
+    - ``HanaAgentMemorySaver(base_url=..., auth=IASAuth())`` — **IAS saver**: the
       Bearer token is supplied per request via ``ias_access_token`` in
-      ``config["configurable"]``. ``IAS(ias_access_token=...)`` may set a default
-      token (overridden per request).
-    - ``HanaAgentMemorySaver(base_url=..., auth=XSUAA(token_url=..., client_id=...,
+      ``config["configurable"]``. ``IASAuth(ias_access_token=...)`` may set a default
+      token or callable (overridden per request by a string in config).
+    - ``HanaAgentMemorySaver(base_url=..., auth=XsuaaAuth(token_url=..., client_id=...,
       client_secret=...))`` — **XSUAA saver**: ``client_credentials`` flow. Any
       ``ias_access_token`` in ``config["configurable"]`` is ignored. Optionally pass
       ``tenant_id`` for multi-tenant routing (omitting it uses the provider tenant).
@@ -171,53 +194,55 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
     Credentials fall back to environment variables when left ``None``:
 
     - ``AGENT_MEMORY_BASE_URL``    → ``base_url``
-    - ``AGENT_MEMORY_TOKEN_URL``   → ``XSUAA(token_url=...)``
-    - ``AGENT_MEMORY_CLIENT_ID``   → ``XSUAA(client_id=...)``
-    - ``AGENT_MEMORY_CLIENT_SECRET`` → ``XSUAA(client_secret=...)``
-    - ``AGENT_MEMORY_IAS_ACCESS_TOKEN`` → ``IAS(ias_access_token=...)``
+    - ``AGENT_MEMORY_TOKEN_URL``   → ``XsuaaAuth(token_url=...)``
+    - ``AGENT_MEMORY_CLIENT_ID``   → ``XsuaaAuth(client_id=...)``
+    - ``AGENT_MEMORY_CLIENT_SECRET`` → ``XsuaaAuth(client_secret=...)``
+    - ``AGENT_MEMORY_IAS_ACCESS_TOKEN`` → ``IASAuth(ias_access_token=...)``
 
-    ``base_url`` and ``auth`` are always required. ``XSUAA`` requires all three
+    ``base_url`` and ``auth`` are always required. ``XsuaaAuth`` requires all three
     credentials to resolve (via arg or env) and raises otherwise::
 
-        saver = HanaAgentMemorySaver(auth=XSUAA())  # reads base_url + creds from env
+        saver = HanaAgentMemorySaver(auth=XsuaaAuth())  # reads base_url + creds from env
     """
 
     def __init__(
         self,
         base_url: str | None = None,
         *,
-        auth: IAS | XSUAA,
+        auth: IASAuth | XsuaaAuth,
         timeout: float = 30.0,
         serde: Any | None = None,
     ) -> None:
         """Initialise the saver.
 
-        The auth flow is declared explicitly via ``auth`` — an :class:`IAS` or
-        :class:`XSUAA` instance — and fixed for the saver's lifetime. It is never
+        The auth flow is declared explicitly via ``auth`` — an :class:`IASAuth` or
+        :class:`XsuaaAuth` instance — and fixed for the saver's lifetime. It is never
         inferred.
 
         ``base_url`` is always required; it falls back to ``AGENT_MEMORY_BASE_URL``
-        when ``None``. XSUAA credentials live on the :class:`XSUAA` instance and
+        when ``None``. XSUAA credentials live on the :class:`XsuaaAuth` instance and
         each falls back to its ``AGENT_MEMORY_*`` env var.
 
         Args:
             base_url: Agent Memory Service base URL, e.g.
                 ``"https://<service-host>"``. Falls back to
                 ``AGENT_MEMORY_BASE_URL`` env var.
-            auth: ``IAS()`` or ``XSUAA(token_url=..., client_id=...,
+            auth: ``IASAuth()`` or ``XsuaaAuth(token_url=..., client_id=...,
                 client_secret=...)`` — the auth flow for this saver. Required.
-            timeout: HTTP request timeout in seconds. Default ``30.0``.
+            timeout: HTTP request timeout in seconds. Default 30.0.
+                IAS callbacks must enforce their own I/O timeouts.
             serde: Custom serializer. Defaults to ``JsonPlusSerializer``.
         """
-        resolved_base_url = base_url or os.getenv("AGENT_MEMORY_BASE_URL")
-        if not resolved_base_url:
+        resolved_base_url = (
+            os.getenv("AGENT_MEMORY_BASE_URL") if base_url is None else base_url
+        )
+        if not isinstance(resolved_base_url, str) or not resolved_base_url.strip():
             raise ValueError(
                 "HanaAgentMemorySaver requires base_url / AGENT_MEMORY_BASE_URL."
             )
 
-        if isinstance(auth, XSUAA):
+        if isinstance(auth, XsuaaAuth):
             self._is_ias = False
-            self._default_ias_token = None
             missing = auth._missing()
             if missing:
                 raise ValueError(
@@ -228,13 +253,18 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             resolved_token_url = auth.token_url
             resolved_client_id = auth.client_id
             resolved_client_secret = auth.client_secret
-        elif isinstance(auth, IAS):
+            self._ias_fetcher: IASTokenFetcher | None = None
+        elif isinstance(auth, IASAuth):
             self._is_ias = True
-            self._default_ias_token = auth.ias_access_token
             resolved_token_url = resolved_client_id = resolved_client_secret = None
+            self._ias_fetcher = (
+                IASTokenFetcher(auth.ias_access_token, timeout)
+                if auth.ias_access_token is not None
+                else None
+            )
         else:
             raise ValueError(
-                "HanaAgentMemorySaver: auth must be an IAS() or XSUAA() instance, "
+                "HanaAgentMemorySaver: auth must be an IASAuth() or XsuaaAuth() instance, "
                 f"got {type(auth).__name__}."
             )
 
@@ -246,22 +276,14 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         self._base = resolved_base_url.rstrip("/")
         self._timeout = timeout
 
-        self._token_fetcher = TokenFetcher(
-            resolved_token_url,
-            resolved_client_id,
-            resolved_client_secret,
-            timeout,
+        self._token_fetcher = XSUAATokenFetcher(
+            resolved_token_url, resolved_client_id, resolved_client_secret, timeout
         )
         self._token_registry = TokenRegistry()
-        # Tests pre-seed _token_cache._token to skip real token fetches.
         self._token_cache = self._token_registry.get()
-
-        self._retry = RetryClient(
-            self._token_fetcher,
-        )
-        self._sync_retry = SyncRetryClient(
-            self._token_fetcher,
-        )
+        self._ias_token_cache = CachedToken()
+        self._retry = RetryClient(self._token_fetcher)
+        self._sync_retry = SyncRetryClient(self._token_fetcher)
 
     # ------------------------------------------------------------------
     # URL helpers
@@ -368,7 +390,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
                 annotation=str,
                 name="IAS Token",
                 description="Per-request IAS Bearer token for IAS-authenticated tenants. "
-                "When present, used instead of XSUAA client_credentials.",
+                "Overrides the IAS default source; ignored by XSUAA savers.",
                 default="",
                 is_shared=True,
             ),
@@ -377,7 +399,12 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
     def _extract_configurable(self, config: RunnableConfig) -> dict[str, str]:
         """Return only the known configurable keys; discard checkpoint_map etc."""
         cfg = config.get("configurable", {})
-        return {k: v for k, v in cfg.items() if k in _KNOWN_CONFIGURABLE_KEYS}
+        extracted = {k: v for k, v in cfg.items() if k in _KNOWN_CONFIGURABLE_KEYS}
+        if self._is_ias:
+            token = optional_ias_token(extracted.pop("ias_access_token", None))
+            if token is not None:
+                extracted["ias_access_token"] = token
+        return extracted
 
     def _resolve_tenant_cache(self, cfg: dict[str, str]) -> CachedToken:
         """Return the CachedToken for this call.
@@ -389,40 +416,28 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             return self._token_registry.get(tenant_id)
         return self._token_cache
 
-    def _resolve_auth(self, cfg: dict[str, str]) -> tuple[str | None, CachedToken]:
-        """Validate per-request auth and return ``(ias_access_token, token_cache)``.
-
-        Branches on the saver's construction-time kind (``_is_ias``), which is
-        immutable for the saver's lifetime:
-
-        - **IAS saver** (``_is_ias=True``, no XSUAA credentials): ``ias_access_token``
-          in ``cfg`` is mandatory. Raises if absent or whitespace-only.
-        - **XSUAA saver** (``_is_ias=False``, full XSUAA credentials): ``ias_access_token``
-          in ``cfg`` is ignored. Warns on every call if ``tenant_id`` is absent
-          (provider tenant used instead of multi-tenant routing).
-
-        Raises:
-            ValueError: IAS saver invoked without an ``ias_access_token`` — would
-                otherwise send an unauthenticated request.
-        """
+    def _resolve_auth(
+        self, cfg: dict[str, str]
+    ) -> tuple[XSUAATokenFetcher | IASTokenFetcher, CachedToken]:
+        """Select one provider and its identity-scoped cache for this operation."""
         if self._is_ias:
-            raw = cfg.get("ias_access_token")
-            ias_access_token = (raw.strip() if raw else None) or self._default_ias_token
-            if not ias_access_token:
-                raise ValueError(
-                    "No auth available: this saver was constructed with the "
-                    "hana-agent-memory-serverless plan, so an IAS token is "
-                    "required for this request."
-                )
-            return ias_access_token, self._token_cache  # cache unused for IAS
+            token = optional_ias_token(cfg.get("ias_access_token"))
+            if token is not None:
+                return IASTokenFetcher(token, self._timeout), CachedToken()
+            if self._ias_fetcher is not None:
+                return self._ias_fetcher, self._ias_token_cache
+            raise ValueError(
+                "No auth available: this saver was constructed with the "
+                "hana-agent-memory-serverless plan, so an IAS token is "
+                "required for this request."
+            )
 
-        # XSUAA saver: ignore any ias_access_token in cfg, validate tenant
         if not cfg.get("tenant_id"):
             logger.debug(
                 "No tenant_id provided; using provider tenant. "
                 "Set tenant_id for multi-tenant routing."
             )
-        return None, self._resolve_tenant_cache(cfg)
+        return self._token_fetcher, self._resolve_tenant_cache(cfg)
 
     # ------------------------------------------------------------------
     # Serialization helpers
@@ -601,7 +616,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
 
     def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         cfg = self._extract_configurable(config)
-        ias_access_token, cache = self._resolve_auth(cfg)
+        fetcher, cache = self._resolve_auth(cfg)
         thread_id = cfg["thread_id"]
         snapshot_scope = cfg.get("checkpoint_ns", "")
         checkpoint_id = cfg.get("checkpoint_id")
@@ -639,9 +654,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             url = self._build_url(self._snapshots_url(), params)
 
         try:
-            r = self._sync_retry.get(
-                url, token_cache=cache, ias_access_token=ias_access_token
-            )
+            r = self._sync_retry.get(url, token_cache=cache, fetcher=fetcher)
         except httpx.HTTPStatusError as e:
             # For key-based access, 404 means checkpoint doesn't exist
             if checkpoint_id and e.response.status_code == 404:
@@ -661,9 +674,11 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         if row is None:
             return None
 
+        # Embed only string tokens in returned config (not callables).
+        returned_ias_token = cfg.get("ias_access_token") if self._is_ias else None
         result = self._row_to_tuple(
             row,
-            ias_access_token=ias_access_token,
+            ias_access_token=returned_ias_token,
             tenant_id=cfg.get("tenant_id"),
         )
         logger.debug(
@@ -696,10 +711,9 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             limit: Optional maximum number of results to return
 
         Note:
-            ``config=None`` (list all threads) is **not supported for IAS savers**.
-            There is no mechanism to supply an ``ias_access_token`` without a config
-            object, so the call will raise ``ValueError``.  XSUAA savers fall back
-            to the provider tenant when ``config`` is ``None``.
+            With config=None, IAS requires a saver-level default source and
+            lists threads accessible to that identity. Without a default it
+            raises ValueError. XSUAA uses the provider tenant when config=None.
 
         Yields:
             CheckpointTuple objects in DESC order by checkpoint_id (newest first).
@@ -727,7 +741,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             # Support point queries with checkpoint_id
             checkpoint_id = cfg.get("checkpoint_id")
 
-        ias_access_token, cache = self._resolve_auth(cfg)
+        fetcher, cache = self._resolve_auth(cfg)
 
         before_id = None
         if before is not None:
@@ -769,9 +783,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         # When unbounded, follow @odata.nextLink to collect all pages.
         first_url = self._build_url(self._snapshots_url(), params)
         if limit is not None:
-            r = self._sync_retry.get(
-                first_url, token_cache=cache, ias_access_token=ias_access_token
-            )
+            r = self._sync_retry.get(first_url, token_cache=cache, fetcher=fetcher)
             r.raise_for_status()
             rows = r.json().get("value", [])
         else:
@@ -779,13 +791,15 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
                 self._sync_retry,
                 first_url,
                 token_cache=cache,
-                ias_access_token=ias_access_token,
+                fetcher=fetcher,
             )
 
+        # Embed only string tokens in returned configs (not callables).
+        returned_ias_token = cfg.get("ias_access_token") if self._is_ias else None
         for row in rows:
             yield self._row_to_tuple(
                 row,
-                ias_access_token=ias_access_token,
+                ias_access_token=returned_ias_token,
                 tenant_id=cfg.get("tenant_id") if config is not None else None,
             )
 
@@ -803,7 +817,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         cfg = self._extract_configurable(config)
-        ias_access_token, cache = self._resolve_auth(cfg)
+        fetcher, cache = self._resolve_auth(cfg)
         thread_id = cfg["thread_id"]
         snapshot_scope = cfg.get("checkpoint_ns", "")
         serialization_type, encoded_state = self._encode_checkpoint(checkpoint)
@@ -831,7 +845,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             self._snapshots_url(),
             json=body,
             token_cache=cache,
-            ias_access_token=ias_access_token,
+            fetcher=fetcher,
         )
         logger.debug(
             "PUT checkpoint SUCCESS: thread_id=%s checkpoint_id=%s status=%d",
@@ -840,13 +854,19 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             response.status_code,
         )
 
+        # Embed only string tokens in returned config (not callables).
+        returned_ias_token = cfg.get("ias_access_token") if self._is_ias else None
         return {
             "configurable": {
                 "thread_id": thread_id,
                 "checkpoint_ns": snapshot_scope,
                 "checkpoint_id": checkpoint["id"],
                 **({"tenant_id": cfg["tenant_id"]} if cfg.get("tenant_id") else {}),
-                **({"ias_access_token": ias_access_token} if ias_access_token else {}),
+                **(
+                    {"ias_access_token": returned_ias_token}
+                    if returned_ias_token
+                    else {}
+                ),
             }
         }
 
@@ -861,7 +881,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             return
 
         cfg = self._extract_configurable(config)
-        ias_access_token, cache = self._resolve_auth(cfg)
+        fetcher, cache = self._resolve_auth(cfg)
         snapshot_id = cfg.get("checkpoint_id")
         if not snapshot_id:
             raise ValueError(
@@ -893,7 +913,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             self._snapshot_writes_url(),
             json=body,
             token_cache=cache,
-            ias_access_token=ias_access_token,
+            fetcher=fetcher,
         )
         logger.debug(
             "PUT writes SUCCESS: thread_id=%s snapshot_id=%s task_id=%s status=%d",
@@ -923,8 +943,9 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         ``config["configurable"]``.  The required argument depends on the
         saver kind set at construction time:
 
-        - **IAS saver** (``base_url`` only): pass ``ias_access_token``.
-        - **XSUAA saver** (full credentials): pass ``tenant_id``.
+        - **IAS saver**: pass ias_access_token or configure a default source.
+        - **XSUAA saver**: pass tenant_id to select a subscriber tenant; omitting
+          it uses the provider tenant.
 
         ::
 
@@ -939,8 +960,8 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
 
         Args:
             thread_id: ID of the thread whose checkpoints and writes to delete.
-            tenant_id: BTP subaccount zone ID. Required for XSUAA savers.
-            ias_access_token: IAS Bearer token. Required for IAS savers.
+            tenant_id: Optional BTP zone ID for XSUAA subscriber routing.
+            ias_access_token: IAS Bearer token; required when no default is configured.
         """
         # POST to the deleteByThread unbound action on AgentSnapshotService.
         # OData v4 only permits DELETE by full key, so bulk-delete-by-thread is
@@ -951,34 +972,18 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             "DELETE thread: thread_id=%s action=deleteByThread",
             thread_id,
         )
-        if self._is_ias:
-            ias_access_token = (
-                ias_access_token and ias_access_token.strip()
-            ) or self._default_ias_token
-            if not ias_access_token:
-                raise ValueError(
-                    "No auth available: this saver was constructed with the "
-                    "hana-agent-memory-serverless plan, so an IAS token is "
-                    "required for this request."
-                )
-            resolved_ias_access_token, cache = ias_access_token, self._token_cache
-        else:
-            if not tenant_id:
-                logger.debug(
-                    "No tenant_id provided; using provider tenant. "
-                    "Set tenant_id for multi-tenant routing."
-                )
-            resolved_ias_access_token, cache = (
-                None,
-                self._resolve_tenant_cache({"tenant_id": tenant_id or ""}),
-            )
+        cfg: dict[str, str] = {
+            "ias_access_token": ias_access_token or "",
+            "tenant_id": tenant_id or "",
+        }
+        fetcher, cache = self._resolve_auth(cfg)
 
         try:
             r = self._sync_retry.post(
                 self._delete_by_thread_url(),
                 json={"threadId": thread_id},
                 token_cache=cache,
-                ias_access_token=resolved_ias_access_token,
+                fetcher=fetcher,
             )
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
@@ -1000,7 +1005,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         cfg = self._extract_configurable(config)
-        ias_access_token, cache = self._resolve_auth(cfg)
+        fetcher, cache = self._resolve_auth(cfg)
         thread_id = cfg["thread_id"]
         snapshot_scope = cfg.get("checkpoint_ns", "")
         checkpoint_id = cfg.get("checkpoint_id")
@@ -1038,9 +1043,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             url = self._build_url(self._snapshots_url(), params)
 
         try:
-            r = await self._retry.get(
-                url, token_cache=cache, ias_access_token=ias_access_token
-            )
+            r = await self._retry.get(url, token_cache=cache, fetcher=fetcher)
         except httpx.HTTPStatusError as e:
             # For key-based access, 404 means checkpoint doesn't exist
             if checkpoint_id and e.response.status_code == 404:
@@ -1060,9 +1063,11 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         if row is None:
             return None
 
+        # Embed only string tokens in returned config (not callables).
+        returned_ias_token = cfg.get("ias_access_token") if self._is_ias else None
         result = self._row_to_tuple(
             row,
-            ias_access_token=ias_access_token,
+            ias_access_token=returned_ias_token,
             tenant_id=cfg.get("tenant_id"),
         )
         logger.debug(
@@ -1094,10 +1099,9 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             limit: Optional maximum number of results to return
 
         Note:
-            ``config=None`` (list all threads) is **not supported for IAS savers**.
-            There is no mechanism to supply an ``ias_access_token`` without a config
-            object, so the call will raise ``ValueError``.  XSUAA savers fall back
-            to the provider tenant when ``config`` is ``None``.
+            With config=None, IAS requires a saver-level default source and
+            lists threads accessible to that identity. Without a default it
+            raises ValueError. XSUAA uses the provider tenant when config=None.
 
         Yields:
             CheckpointTuple objects in DESC order by checkpoint_id (newest first).
@@ -1125,7 +1129,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             # Support point queries with checkpoint_id
             checkpoint_id = cfg.get("checkpoint_id")
 
-        ias_access_token, cache = self._resolve_auth(cfg)
+        fetcher, cache = self._resolve_auth(cfg)
 
         before_id = None
         if before is not None:
@@ -1167,9 +1171,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         # When unbounded, follow @odata.nextLink to collect all pages.
         first_url = self._build_url(self._snapshots_url(), params)
         if limit is not None:
-            r = await self._retry.get(
-                first_url, token_cache=cache, ias_access_token=ias_access_token
-            )
+            r = await self._retry.get(first_url, token_cache=cache, fetcher=fetcher)
             r.raise_for_status()
             rows = r.json().get("value", [])
         else:
@@ -1177,13 +1179,15 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
                 self._retry,
                 first_url,
                 token_cache=cache,
-                ias_access_token=ias_access_token,
+                fetcher=fetcher,
             )
 
+        # Embed only string tokens in returned configs (not callables).
+        returned_ias_token = cfg.get("ias_access_token") if self._is_ias else None
         for row in rows:
             yield self._row_to_tuple(
                 row,
-                ias_access_token=ias_access_token,
+                ias_access_token=returned_ias_token,
                 tenant_id=cfg.get("tenant_id") if config is not None else None,
             )
 
@@ -1200,7 +1204,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         cfg = self._extract_configurable(config)
-        ias_access_token, cache = self._resolve_auth(cfg)
+        fetcher, cache = self._resolve_auth(cfg)
         thread_id = cfg["thread_id"]
         snapshot_scope = cfg.get("checkpoint_ns", "")
         serialization_type, encoded_state = self._encode_checkpoint(checkpoint)
@@ -1231,7 +1235,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             self._snapshots_url(),
             json=body,
             token_cache=cache,
-            ias_access_token=ias_access_token,
+            fetcher=fetcher,
         )
         logger.debug(
             "PUT checkpoint SUCCESS (async): thread_id=%s checkpoint_id=%s status=%d",
@@ -1240,13 +1244,19 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             response.status_code,
         )
 
+        # Embed only string tokens in returned config (not callables).
+        returned_ias_token = cfg.get("ias_access_token") if self._is_ias else None
         return {
             "configurable": {
                 "thread_id": thread_id,
                 "checkpoint_ns": snapshot_scope,
                 "checkpoint_id": checkpoint["id"],
                 **({"tenant_id": cfg["tenant_id"]} if cfg.get("tenant_id") else {}),
-                **({"ias_access_token": ias_access_token} if ias_access_token else {}),
+                **(
+                    {"ias_access_token": returned_ias_token}
+                    if returned_ias_token
+                    else {}
+                ),
             }
         }
 
@@ -1261,7 +1271,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             return
 
         cfg = self._extract_configurable(config)
-        ias_access_token, cache = self._resolve_auth(cfg)
+        fetcher, cache = self._resolve_auth(cfg)
         snapshot_id = cfg.get("checkpoint_id")
         if not snapshot_id:
             raise ValueError(
@@ -1294,7 +1304,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             self._snapshot_writes_url(),
             json=body,
             token_cache=cache,
-            ias_access_token=ias_access_token,
+            fetcher=fetcher,
         )
         logger.debug(
             "PUT writes SUCCESS (async): thread_id=%s checkpoint_id=%s status=%d",
@@ -1317,53 +1327,37 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         directly by application code.  LangGraph never calls it, so there is no
         ``config`` object to carry auth context.
 
-        Pass ``ias_access_token`` and ``tenant_id`` explicitly; the required argument
-        depends on the saver kind set at construction time:
+        Authentication follows the saver kind and any configured default:
 
-        - **IAS saver** (``base_url`` only): pass ``ias_access_token``.
-        - **XSUAA saver** (full credentials): pass ``tenant_id``.
+        - **IAS saver**: pass ias_access_token or configure a default source.
+        - **XSUAA saver**: pass tenant_id to select a subscriber tenant; omitting
+          it uses the provider tenant.
 
         The call is idempotent: deleting a thread that does not exist returns
         without error.
 
         Args:
             thread_id: ID of the thread whose checkpoints and writes to delete.
-            tenant_id: BTP subaccount zone ID. Required for XSUAA savers.
-            ias_access_token: IAS Bearer token. Required for IAS savers.
+            tenant_id: Optional BTP zone ID for XSUAA subscriber routing.
+            ias_access_token: IAS Bearer token; required when no default is configured.
         """
         # POST to the deleteByThread unbound action on AgentSnapshotService.
         # OData v4 only permits DELETE by full key, so bulk-delete-by-thread is
         # exposed as an action on the backend (see agent-snapshot-service.cds).
         # See delete_thread() for the 404-as-idempotent-success pattern.
         logger.debug("DELETE thread (async): thread_id=%s", thread_id)
-        if self._is_ias:
-            ias_access_token = (
-                ias_access_token and ias_access_token.strip()
-            ) or self._default_ias_token
-            if not ias_access_token:
-                raise ValueError(
-                    "No auth available: this saver was constructed with the "
-                    "hana-agent-memory-serverless plan, so an IAS token is "
-                    "required for this request."
-                )
-            resolved_ias_access_token, cache = ias_access_token, self._token_cache
-        else:
-            if not tenant_id:
-                logger.debug(
-                    "No tenant_id provided; using provider tenant. "
-                    "Set tenant_id for multi-tenant routing."
-                )
-            resolved_ias_access_token, cache = (
-                None,
-                self._resolve_tenant_cache({"tenant_id": tenant_id or ""}),
-            )
+        cfg: dict[str, str] = {
+            "ias_access_token": ias_access_token or "",
+            "tenant_id": tenant_id or "",
+        }
+        fetcher, cache = self._resolve_auth(cfg)
 
         try:
             r = await self._retry.post(
                 self._delete_by_thread_url(),
                 json={"threadId": thread_id},
                 token_cache=cache,
-                ias_access_token=resolved_ias_access_token,
+                fetcher=fetcher,
             )
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
