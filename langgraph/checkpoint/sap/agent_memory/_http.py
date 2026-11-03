@@ -35,7 +35,7 @@ def validate_token(value: object) -> str:
     """Normalize a bearer token without exposing invalid credentials in errors."""
     if not isinstance(value, str):
         raise TypeError("Token source must return a string.")
-    token = value.strip(" ")
+    token = value.strip()
     if not token:
         raise ValueError("Token source returned an empty token.")
     if any(ord(char) <= 32 or ord(char) >= 127 for char in token):
