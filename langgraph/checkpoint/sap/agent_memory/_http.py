@@ -45,7 +45,7 @@ def validate_token(value: object) -> str:
 
 def optional_ias_token(value: object) -> str | None:
     """A missing or space-only request override selects the default source."""
-    if value is None or (isinstance(value, str) and not value.strip(" ")):
+    if value is None or (isinstance(value, str) and not value.strip()):
         return None
     return validate_token(value)
 
@@ -265,7 +265,7 @@ class XSUAATokenFetcher:
                 e.response.status_code,
             )
             raise ValueError("Failed to obtain OAuth2 token") from e
-        except (httpx.RequestError, ValueError, KeyError) as e:
+        except (httpx.RequestError, ValueError, KeyError, TypeError) as e:
             logger.error("OAuth2 token fetch failed: %s", type(e).__name__)
             raise ValueError("OAuth2 token service unavailable") from e
 
@@ -307,7 +307,7 @@ class XSUAATokenFetcher:
                 e.response.status_code,
             )
             raise ValueError("Failed to obtain OAuth2 token") from e
-        except (httpx.RequestError, ValueError, KeyError) as e:
+        except (httpx.RequestError, ValueError, KeyError, TypeError) as e:
             logger.error("OAuth2 token fetch failed: %s", type(e).__name__)
             raise ValueError("OAuth2 token service unavailable") from e
 
