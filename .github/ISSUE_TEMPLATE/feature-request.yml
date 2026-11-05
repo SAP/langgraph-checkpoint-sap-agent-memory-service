@@ -1,0 +1,33 @@
+name: Feature Request
+description: Propose a new feature or improvement for the LangGraph checkpointers for SAP Agent Memory Service.
+labels:
+  - feature
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **Disclaimer:** Do not include SAP-internal or customer-specific information in this issue (e.g. internal system URLs, customer names, tenant IDs, or confidential configurations). This is a public repository.
+  - type: textarea
+    attributes:
+      label: "Is your feature request related to a problem?"
+      description: "A clear and concise description of what the problem is. E.g. I'm always frustrated when ..."
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: "Describe the Solution You Would Like"
+      description: "A clear and concise description of what you want to happen."
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: "Describe Alternatives You Have Considered"
+      description: "A clear and concise description of any alternative solutions or features you have considered."
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: "Additional Context"
+      description: "Add any other context, code examples, or screenshots about the feature request here."
+    validations:
+      required: false
