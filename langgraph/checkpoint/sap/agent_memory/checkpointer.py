@@ -304,7 +304,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
 
         httpx's ``params=`` dict percent-encodes ``$`` → ``%24``, which makes
         OData system query options like ``$top`` and ``$orderby`` unrecognised
-        by the service (400 Bad Request).  Plain params (``threadId``, etc.)
+        by the service (400 Bad Request).  Plain params (``threadID``, etc.)
         are encoded normally via ``urlencode``.
         """
         plain = {k: v for k, v in params.items() if not k.startswith("$")}
@@ -328,7 +328,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         """Build OData URL with key syntax: /entity(key1='val1',key2='val2')
 
         Used for accessing specific entities by their composite key.
-        Example: /snapshot(threadId='abc',snapshotScope='',snapshotId='xyz')
+        Example: /snapshot(threadID='abc',snapshotScope='',snapshotID='xyz')
         """
         key_parts = [
             f"{k}='{quote(_escape_odata_string(v), safe='')}'" for k, v in keys.items()
@@ -347,7 +347,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         Args:
             thread_id: Optional thread filter (None = list all threads)
             snapshot_scope: Optional namespace filter (None = list all namespaces)
-            before_id: Optional cursor for pagination (filters to snapshotId < before_id)
+            before_id: Optional cursor for pagination (filters to snapshotID < before_id)
             checkpoint_id: Optional single checkpoint filter (point query)
 
         Returns:
@@ -356,16 +356,16 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         parts = []
 
         if thread_id is not None:
-            parts.append(f"threadId eq '{_escape_odata_string(thread_id)}'")
+            parts.append(f"threadID eq '{_escape_odata_string(thread_id)}'")
 
         if snapshot_scope is not None:
             parts.append(f"snapshotScope eq '{_escape_odata_string(snapshot_scope)}'")
 
         if checkpoint_id is not None:
-            parts.append(f"snapshotId eq '{_escape_odata_string(checkpoint_id)}'")
+            parts.append(f"snapshotID eq '{_escape_odata_string(checkpoint_id)}'")
 
         if before_id is not None:
-            parts.append(f"snapshotId lt '{_escape_odata_string(before_id)}'")
+            parts.append(f"snapshotID lt '{_escape_odata_string(before_id)}'")
 
         return " and ".join(parts) if parts else None
 
@@ -518,11 +518,11 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             (task_id, channel, value) for _idx, task_id, channel, value in flattened
         ]
 
-        thread_id: str = row["threadId"]
+        thread_id: str = row["threadID"]
         snapshot_scope: str = row.get("snapshotScope", "")
 
         parent_config: RunnableConfig | None = None
-        parent_snapshot_id = row.get("parentSnapshotId")
+        parent_snapshot_id = row.get("parentSnapshotID")
 
         if parent_snapshot_id:
             parent_config = {
@@ -544,7 +544,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
                 "configurable": {
                     "thread_id": thread_id,
                     "checkpoint_ns": snapshot_scope,
-                    "checkpoint_id": row["snapshotId"],
+                    "checkpoint_id": row["snapshotID"],
                     **({"tenant_id": tenant_id} if tenant_id else {}),
                     **(
                         {"ias_access_token": ias_access_token}
@@ -587,7 +587,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
                     f"Agent Memory Service snapshot response is not valid JSON — "
                     f"cannot restore checkpoint for thread '{thread_id}'. "
                 ) from e
-            if not row or not row.get("snapshotId"):
+            if not row or not row.get("snapshotID"):
                 logger.debug(
                     "%s: NOT FOUND thread_id=%s checkpoint_id=%s",
                     log_prefix,
@@ -630,13 +630,13 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
 
         # If we have a specific checkpoint_id, use OData key syntax for direct access
         if checkpoint_id:
-            # Use OData key syntax: /snapshot(threadId='x',snapshotScope='',snapshotId='y')
+            # Use OData key syntax: /snapshot(threadID='x',snapshotScope='',snapshotID='y')
             url = self._build_odata_key_url(
                 self._snapshots_url(),
                 {
-                    "threadId": thread_id,
+                    "threadID": thread_id,
                     "snapshotScope": snapshot_scope,
-                    "snapshotId": checkpoint_id,
+                    "snapshotID": checkpoint_id,
                 },
             )
             url += "?$expand=writes"
@@ -645,7 +645,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             # Must use $filter for proper query-based filtering
             params: dict[str, str] = {
                 "$top": "1",
-                "$orderby": "snapshotId desc",
+                "$orderby": "snapshotID desc",
                 "$expand": "writes",
             }
             snapshot_filter = self._build_snapshot_filter(thread_id, snapshot_scope)
@@ -771,7 +771,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
                 filter_parts.append(metadata_filter)
 
         # Always order DESC; request writes inline to avoid N+1 round-trips
-        params: dict[str, str] = {"$orderby": "snapshotId desc", "$expand": "writes"}
+        params: dict[str, str] = {"$orderby": "snapshotID desc", "$expand": "writes"}
         if filter_parts:
             params["$filter"] = " and ".join(filter_parts)
 
@@ -832,10 +832,10 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         logger.debug("PUT checkpoint data: %d bytes serialized", len(encoded_state))
 
         body = {
-            "threadId": thread_id,
+            "threadID": thread_id,
             "snapshotScope": snapshot_scope,
-            "snapshotId": checkpoint["id"],
-            "parentSnapshotId": cfg.get("checkpoint_id"),
+            "snapshotID": checkpoint["id"],
+            "parentSnapshotID": cfg.get("checkpoint_id"),
             "serializationType": serialization_type,
             "state": encoded_state,
             "metadata": metadata or {},
@@ -901,9 +901,9 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         logger.debug("PUT writes data: %d bytes serialized", len(encoded_payload))
 
         body = {
-            "threadId": cfg["thread_id"],
+            "threadID": cfg["thread_id"],
             "snapshotScope": cfg.get("checkpoint_ns", ""),
-            "snapshotId": snapshot_id,
+            "snapshotID": snapshot_id,
             "writeKey": self._write_key(task_id, task_path),
             "serializationType": serialization_type,
             "payload": encoded_payload,
@@ -981,7 +981,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         try:
             r = self._sync_retry.post(
                 self._delete_by_thread_url(),
-                json={"threadId": thread_id},
+                json={"threadID": thread_id},
                 token_cache=cache,
                 fetcher=fetcher,
             )
@@ -1019,13 +1019,13 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
 
         # If we have a specific checkpoint_id, use OData key syntax for direct access
         if checkpoint_id:
-            # Use OData key syntax: /snapshot(threadId='x',snapshotScope='',snapshotId='y')
+            # Use OData key syntax: /snapshot(threadID='x',snapshotScope='',snapshotID='y')
             url = self._build_odata_key_url(
                 self._snapshots_url(),
                 {
-                    "threadId": thread_id,
+                    "threadID": thread_id,
                     "snapshotScope": snapshot_scope,
-                    "snapshotId": checkpoint_id,
+                    "snapshotID": checkpoint_id,
                 },
             )
             url += "?$expand=writes"
@@ -1034,7 +1034,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
             # Must use $filter for proper query-based filtering
             params: dict[str, str] = {
                 "$top": "1",
-                "$orderby": "snapshotId desc",
+                "$orderby": "snapshotID desc",
                 "$expand": "writes",
             }
             snapshot_filter = self._build_snapshot_filter(thread_id, snapshot_scope)
@@ -1159,7 +1159,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
                 filter_parts.append(metadata_filter)
 
         # Always order DESC; request writes inline to avoid N+1 round-trips
-        params: dict[str, str] = {"$orderby": "snapshotId desc", "$expand": "writes"}
+        params: dict[str, str] = {"$orderby": "snapshotID desc", "$expand": "writes"}
         if filter_parts:
             params["$filter"] = " and ".join(filter_parts)
 
@@ -1222,10 +1222,10 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         )
 
         body = {
-            "threadId": thread_id,
+            "threadID": thread_id,
             "snapshotScope": snapshot_scope,
-            "snapshotId": checkpoint["id"],
-            "parentSnapshotId": parent_id,
+            "snapshotID": checkpoint["id"],
+            "parentSnapshotID": parent_id,
             "serializationType": serialization_type,
             "state": encoded_state,
             "metadata": metadata or {},
@@ -1292,9 +1292,9 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         )
 
         body = {
-            "threadId": thread_id,
+            "threadID": thread_id,
             "snapshotScope": cfg.get("checkpoint_ns", ""),
-            "snapshotId": snapshot_id,
+            "snapshotID": snapshot_id,
             "writeKey": self._write_key(task_id, task_path),
             "serializationType": serialization_type,
             "payload": encoded_payload,
@@ -1355,7 +1355,7 @@ class HanaAgentMemorySaver(BaseCheckpointSaver[str]):
         try:
             r = await self._retry.post(
                 self._delete_by_thread_url(),
-                json={"threadId": thread_id},
+                json={"threadID": thread_id},
                 token_cache=cache,
                 fetcher=fetcher,
             )

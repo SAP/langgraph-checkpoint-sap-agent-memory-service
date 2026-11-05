@@ -123,16 +123,16 @@ def _make_snapshot(
     }
     stype, encoded_state = _enc_state(state_obj)
     return {
-        "threadId": thread_id,
+        "threadID": thread_id,
         "snapshotScope": snapshot_scope,
-        "snapshotId": actual_snapshot_id,
-        "parentSnapshotId": parent_snapshot_id,
+        "snapshotID": actual_snapshot_id,
+        "parentSnapshotID": parent_snapshot_id,
         "serializationType": stype,
         "state": encoded_state,
         "metadata": _enc_metadata(
             metadata or {"source": "loop", "step": 1, "writes": {}, "parents": {}}
         ),
-        "createdAt": "2026-01-01T00:00:00Z",
+        "createTimestamp": "2026-01-01T00:00:00Z",
         "writes": writes if writes is not None else [],
     }
 
@@ -145,13 +145,13 @@ def _make_write_row(
     payload_obj = writes if writes is not None else [(0, "messages", ["hello"])]
     stype, encoded = _enc_payload(payload_obj)
     return {
-        "threadId": THREAD_ID,
+        "threadID": THREAD_ID,
         "snapshotScope": SNAPSHOT_SCOPE,
-        "snapshotId": snapshot_id,
+        "snapshotID": snapshot_id,
         "writeKey": write_key,
         "serializationType": stype,
         "payload": encoded,
-        "createdAt": "2026-01-01T00:00:00Z",
+        "createTimestamp": "2026-01-01T00:00:00Z",
     }
 
 
@@ -201,7 +201,7 @@ def test_get_tuple_specific_checkpoint_no_orderby():
     row = _make_snapshot()
 
     # Mock the OData key-based URL (returns single object, not array)
-    key_url = f"{SNAPSHOTS_URL}(threadId='{THREAD_ID}',snapshotScope='{SNAPSHOT_SCOPE}',snapshotId='{SNAPSHOT_ID}')"
+    key_url = f"{SNAPSHOTS_URL}(threadID='{THREAD_ID}',snapshotScope='{SNAPSHOT_SCOPE}',snapshotID='{SNAPSHOT_ID}')"
     respx.get(key_url).mock(return_value=httpx.Response(200, json=row))
 
     # Mock writes URL
@@ -213,8 +213,8 @@ def test_get_tuple_specific_checkpoint_no_orderby():
     # Key-based access should not use $orderby
     assert "$orderby" not in url
     # Should use key syntax instead
-    assert "threadId=" in url
-    assert "snapshotId=" in url
+    assert "threadID=" in url
+    assert "snapshotID=" in url
 
 
 @respx.mock
@@ -324,9 +324,9 @@ def test_put_posts_and_returns_updated_config():
     assert result["configurable"]["thread_id"] == THREAD_ID
 
     body = json.loads(route.calls[0].request.content)
-    assert body["threadId"] == THREAD_ID
-    assert body["snapshotId"] == SNAPSHOT_ID
-    assert body["parentSnapshotId"] == PARENT_SNAPSHOT_ID
+    assert body["threadID"] == THREAD_ID
+    assert body["snapshotID"] == SNAPSHOT_ID
+    assert body["parentSnapshotID"] == PARENT_SNAPSHOT_ID
     assert body["snapshotScope"] == SNAPSHOT_SCOPE
     assert body["serializationType"]
     # state decodes to original checkpoint
@@ -396,8 +396,8 @@ def test_put_writes_posts_to_writes_endpoint():
     )
 
     body = json.loads(route.calls[0].request.content)
-    assert body["threadId"] == THREAD_ID
-    assert body["snapshotId"] == SNAPSHOT_ID
+    assert body["threadID"] == THREAD_ID
+    assert body["snapshotID"] == SNAPSHOT_ID
     assert body["snapshotScope"] == SNAPSHOT_SCOPE
     assert body["writeKey"] == TASK_ID
     assert body["serializationType"]
@@ -575,10 +575,10 @@ def test_list_with_none_config_lists_all_threads():
     results = list(_saver().list(None))
 
     assert len(results) == 2
-    # Verify URL has no threadId filter
+    # Verify URL has no threadID filter
     url = str(respx.calls[0].request.url)
-    assert "threadId" not in url
-    assert "$orderby=snapshotId%20desc" in url
+    assert "threadID" not in url
+    assert "$orderby=snapshotID%20desc" in url
 
 
 @respx.mock
@@ -645,8 +645,8 @@ def test_list_with_checkpoint_id_returns_single():
     url = str(respx.calls[0].request.url)
     # Check for URL-encoded version: %27 is single quote '
     assert (
-        "snapshotId%20eq%20'snap-123'" in url
-        or "snapshotId%20eq%20%27snap-123%27" in url
+        "snapshotID%20eq%20'snap-123'" in url
+        or "snapshotID%20eq%20%27snap-123%27" in url
     )
 
 
@@ -704,8 +704,8 @@ async def test_aput_posts_checkpoint():
 
     assert result["configurable"]["checkpoint_id"] == SNAPSHOT_ID
     body = json.loads(route.calls[0].request.content)
-    assert body["snapshotId"] == SNAPSHOT_ID
-    assert body["parentSnapshotId"] == PARENT_SNAPSHOT_ID
+    assert body["snapshotID"] == SNAPSHOT_ID
+    assert body["parentSnapshotID"] == PARENT_SNAPSHOT_ID
     # metadata is now a native dict (no base64 encoding)
     assert body["metadata"] == metadata
 
@@ -730,7 +730,7 @@ async def test_aput_writes_posts_to_writes_endpoint():
 
     body = json.loads(route.calls[0].request.content)
     assert body["writeKey"] == TASK_ID
-    assert body["snapshotId"] == SNAPSHOT_ID
+    assert body["snapshotID"] == SNAPSHOT_ID
     decoded = _serde.loads_typed(
         (body["serializationType"], base64.b64decode(body["payload"]))
     )
@@ -790,7 +790,7 @@ def test_delete_thread_posts_to_delete_by_thread_action():
 
     assert route.called
     body = json.loads(route.calls[0].request.content)
-    assert body["threadId"] == THREAD_ID
+    assert body["threadID"] == THREAD_ID
 
 
 @respx.mock
@@ -812,7 +812,7 @@ async def test_adelete_thread_posts_to_delete_by_thread_action():
 
     assert route.called
     body = json.loads(route.calls[0].request.content)
-    assert body["threadId"] == THREAD_ID
+    assert body["threadID"] == THREAD_ID
 
 
 @pytest.mark.asyncio
@@ -1057,9 +1057,9 @@ def test_escape_odata_string_with_sql_injection_attempt():
 
 def test_escape_odata_string_with_odata_injection_attempt():
     """OData filter injection should be neutralized."""
-    malicious = "abc' or threadId eq '"
+    malicious = "abc' or threadID eq '"
     escaped = _escape_odata_string(malicious)
-    assert escaped == "abc'' or threadId eq ''"
+    assert escaped == "abc'' or threadID eq ''"
 
 
 def test_escape_odata_string_with_multiple_quotes():
@@ -1090,7 +1090,7 @@ def test_escape_odata_string_with_no_quotes():
 @respx.mock
 def test_get_tuple_escapes_malicious_thread_id():
     """get_tuple should escape malicious thread_id in OData filter."""
-    malicious_thread_id = "thread' or threadId eq '"
+    malicious_thread_id = "thread' or threadID eq '"
 
     # Mock empty response
     respx.get(SNAPSHOTS_URL).mock(return_value=httpx.Response(200, json={"value": []}))
@@ -1178,7 +1178,7 @@ def test_odata_key_url_escapes_single_quote_before_url_encoding():
     url = str(respx.calls[0].request.url)
     # Doubled single quote URL-encoded: '' → %27%27
     assert "%27%27" in url
-    # Single (un-doubled) encoded quote must NOT appear as the threadId value
+    # Single (un-doubled) encoded quote must NOT appear as the threadID value
     # i.e. "user%27s" without doubling would indicate wrong order
     assert "user%27%27s" in url
 
@@ -1207,9 +1207,9 @@ def test_list_escapes_malicious_before_parameter():
     # Verify request was made
     request = respx.calls[0].request
     url = str(request.url)
-    # The before parameter should be escaped using snapshotId lt 'escaped-value' in OData filter
+    # The before parameter should be escaped using snapshotID lt 'escaped-value' in OData filter
     # The single quote in the malicious string should be doubled
-    assert "snapshotId%20lt%20%27snap%27%27%3B%20DELETE%20FROM--%27" in url
+    assert "snapshotID%20lt%20%27snap%27%27%3B%20DELETE%20FROM--%27" in url
 
 
 @respx.mock
@@ -1464,7 +1464,7 @@ def test_put_retries_on_503_service_unavailable():
     route = respx.post(SNAPSHOTS_URL).mock(
         side_effect=[
             httpx.Response(503, text="Service unavailable"),
-            httpx.Response(200, json={"snapshotId": SNAPSHOT_ID}),
+            httpx.Response(200, json={"snapshotID": SNAPSHOT_ID}),
         ]
     )
 
@@ -1490,7 +1490,7 @@ def test_put_retries_on_timeout():
     route = respx.post(SNAPSHOTS_URL).mock(
         side_effect=[
             httpx.TimeoutException("Connection timeout"),
-            httpx.Response(200, json={"snapshotId": SNAPSHOT_ID}),
+            httpx.Response(200, json={"snapshotID": SNAPSHOT_ID}),
         ]
     )
 
@@ -1596,7 +1596,7 @@ def test_get_tuple_with_unicode_thread_id():
     request = respx.calls[0].request
     url = str(request.url)
     # Unicode should be URL-encoded or present in URL
-    assert "threadId" in url
+    assert "threadID" in url
 
 
 @respx.mock
