@@ -1,0 +1,32 @@
+name: Question
+description: Ask a question about the LangGraph checkpointers for SAP Agent Memory Service.
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **Disclaimer:** Do not include SAP-internal or customer-specific information in this issue (e.g. internal system URLs, customer names, tenant IDs, or confidential configurations). This is a public repository.
+  - type: textarea
+    attributes:
+      label: "Question"
+      description: "Ask your question here."
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: "Context"
+      description: "Provide any relevant context, code snippets, or configuration that helps clarify your question. Please remove sensitive information."
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: "Used Versions"
+      description: "Provide versions used in the project (if relevant)."
+      value: |
+        - Python version via `python --version`: ...
+        - `langgraph-checkpoint-sap-agent-memory-service` version: ...
+        - `langgraph` version: ...
+        - Auth mode (XSUAA / IAS): ...
+    validations:
+      required: false
