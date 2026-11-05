@@ -11,10 +11,14 @@ import pytest
 import respx
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
-from langgraph.checkpoint.sap.agent_memory import HanaAgentMemorySaver
+from langgraph.checkpoint.sap.agent_memory import (
+    HanaAgentMemorySaver,
+    IASAuth,
+    XsuaaAuth,
+)
 from langgraph.checkpoint.sap.agent_memory._http import (
     CachedToken,
-    TokenFetcher,
+    XSUAATokenFetcher,
 )
 from langgraph.checkpoint.sap.agent_memory.checkpointer import _escape_odata_string
 
@@ -35,12 +39,19 @@ DELETE_BY_THREAD_URL = f"{BASE_URL}/v1/agent/snapshots/deleteByThread"
 _serde = JsonPlusSerializer()
 
 
+@pytest.fixture(autouse=True)
+def clear_default_ias_environment(monkeypatch):
+    monkeypatch.delenv("AGENT_MEMORY_IAS_ACCESS_TOKEN", raising=False)
+
+
 def _saver(**kwargs) -> HanaAgentMemorySaver:
     saver = HanaAgentMemorySaver(
         base_url=BASE_URL,
-        token_url=TOKEN_URL,
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
+        auth=XsuaaAuth(
+            token_url=TOKEN_URL,
+            client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
+        ),
         **kwargs,
     )
     # Pre-seed token cache so tests never make a real token HTTP call.
@@ -67,7 +78,7 @@ def _ias_saver(monkeypatch, **kwargs) -> HanaAgentMemorySaver:
         "AGENT_MEMORY_CLIENT_SECRET",
     ):
         monkeypatch.delenv(var, raising=False)
-    saver = HanaAgentMemorySaver(base_url=BASE_URL, **kwargs)
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IASAuth(), **kwargs)
     saver._token_cache._token = "test-token"
     saver._token_cache._expires_at = time.monotonic() + 3600
     return saver
@@ -342,9 +353,11 @@ def test_put_sends_bearer_token_when_token_url_configured():
 
     saver = HanaAgentMemorySaver(
         base_url=BASE_URL,
-        token_url=TOKEN_URL,
-        client_id="my-client",
-        client_secret="my-secret",
+        auth=XsuaaAuth(
+            token_url=TOKEN_URL,
+            client_id="my-client",
+            client_secret="my-secret",
+        ),
     )
     checkpoint = {
         "id": SNAPSHOT_ID,
@@ -1232,7 +1245,7 @@ def test_token_fetch_handles_401_unauthorized():
         return_value=httpx.Response(401, json={"error": "unauthorized"})
     )
 
-    fetcher = TokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
+    fetcher = XSUAATokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
 
     with pytest.raises(ValueError, match="Failed to obtain OAuth2 token"):
         fetcher.get_sync(CachedToken())
@@ -1246,7 +1259,7 @@ def test_token_fetch_handles_403_forbidden():
         return_value=httpx.Response(403, json={"error": "forbidden"})
     )
 
-    fetcher = TokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
+    fetcher = XSUAATokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
 
     with pytest.raises(ValueError, match="Failed to obtain OAuth2 token"):
         fetcher.get_sync(CachedToken())
@@ -1258,7 +1271,7 @@ def test_token_fetch_handles_network_timeout():
     token_url = "https://auth.example/oauth/token"
     respx.post(token_url).mock(side_effect=httpx.TimeoutException("Connection timeout"))
 
-    fetcher = TokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
+    fetcher = XSUAATokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
 
     with pytest.raises(ValueError, match="OAuth2 token service unavailable"):
         fetcher.get_sync(CachedToken())
@@ -1270,7 +1283,7 @@ def test_token_fetch_handles_connection_error():
     token_url = "https://auth.example/oauth/token"
     respx.post(token_url).mock(side_effect=httpx.ConnectError("Connection refused"))
 
-    fetcher = TokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
+    fetcher = XSUAATokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
 
     with pytest.raises(ValueError, match="OAuth2 token service unavailable"):
         fetcher.get_sync(CachedToken())
@@ -1282,7 +1295,7 @@ def test_token_fetch_handles_invalid_json():
     token_url = "https://auth.example/oauth/token"
     respx.post(token_url).mock(return_value=httpx.Response(200, text="not json"))
 
-    fetcher = TokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
+    fetcher = XSUAATokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
 
     with pytest.raises(ValueError, match="OAuth2 token service unavailable"):
         fetcher.get_sync(CachedToken())
@@ -1298,7 +1311,7 @@ def test_token_fetch_success_caches_token():
         )
     )
 
-    fetcher = TokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
+    fetcher = XSUAATokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
     cached = CachedToken()
 
     token1 = fetcher.get_sync(cached)
@@ -1310,12 +1323,15 @@ def test_token_fetch_success_caches_token():
     assert len(respx.calls) == 1  # Only one HTTP request
 
 
-def test_token_cache_without_auth_returns_none():
-    """Token cache without credentials should return None."""
-    fetcher = TokenFetcher(None, None, None, timeout=10.0)
+@respx.mock
+def test_retry_client_without_auth_fails_closed():
+    from langgraph.checkpoint.sap.agent_memory._http import SyncRetryClient
 
-    token = fetcher.get_sync(CachedToken())
-    assert token is None
+    route = respx.get(BASE_URL).respond(200)
+    fetcher = XSUAATokenFetcher(None, None, None, timeout=10.0)
+    with pytest.raises(RuntimeError, match="without credentials"):
+        SyncRetryClient(fetcher).get(BASE_URL)
+    assert route.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -1327,7 +1343,7 @@ async def test_token_fetch_async_handles_401():
         return_value=httpx.Response(401, json={"error": "unauthorized"})
     )
 
-    fetcher = TokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
+    fetcher = XSUAATokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
 
     with pytest.raises(ValueError, match="Failed to obtain OAuth2 token"):
         await fetcher.get_async(CachedToken())
@@ -1340,19 +1356,10 @@ async def test_token_fetch_async_handles_timeout():
     token_url = "https://auth.example/oauth/token"
     respx.post(token_url).mock(side_effect=httpx.TimeoutException("Timeout"))
 
-    fetcher = TokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
+    fetcher = XSUAATokenFetcher(token_url, "client-id", "client-secret", timeout=10.0)
 
     with pytest.raises(ValueError, match="OAuth2 token service unavailable"):
         await fetcher.get_async(CachedToken())
-
-
-@pytest.mark.asyncio
-async def test_token_cache_async_without_auth_returns_none():
-    """Async token cache without credentials should return None."""
-    fetcher = TokenFetcher(None, None, None, timeout=10.0)
-
-    token = await fetcher.get_async(CachedToken())
-    assert token is None
 
 
 # ===========================================================================
@@ -1646,25 +1653,39 @@ _ALL_REQUIRED_ENVS = {
 
 
 def test_init_raises_when_any_credential_missing(monkeypatch):
-    """All four credentials are required — missing any raises ValueError."""
+    """XSUAA: all three XSUAA creds required — missing any raises ValueError."""
     for missing_var in _ALL_REQUIRED_ENVS:
+        if missing_var == "AGENT_MEMORY_BASE_URL":
+            continue  # base_url missing is a separate error path
         for var, val in _ALL_REQUIRED_ENVS.items():
             monkeypatch.setenv(var, val)
         monkeypatch.delenv(missing_var)
         with pytest.raises(ValueError, match=missing_var.replace("AGENT_MEMORY_", "")):
-            HanaAgentMemorySaver()
+            HanaAgentMemorySaver(auth=XsuaaAuth())
+
+
+def test_init_requires_auth():
+    """auth is a required keyword — omitting it raises TypeError."""
+    with pytest.raises(TypeError):
+        HanaAgentMemorySaver(base_url=BASE_URL)  # type: ignore[call-arg]
+
+
+def test_init_rejects_non_auth_object():
+    """auth must be an IASAuth()/XsuaaAuth() instance — a bare string is rejected."""
+    with pytest.raises(ValueError, match="must be an IASAuth\\(\\) or XsuaaAuth\\(\\)"):
+        HanaAgentMemorySaver(base_url=BASE_URL, auth="XSUAA")  # type: ignore[arg-type]
 
 
 def test_init_uses_all_env_credentials(monkeypatch):
-    """All four credentials resolve from env vars when no args are passed."""
+    """XSUAA creds resolve from env vars when no cred args are passed."""
     for var, val in _ALL_REQUIRED_ENVS.items():
         monkeypatch.setenv(var, val)
-    saver = HanaAgentMemorySaver()
+    saver = HanaAgentMemorySaver(auth=XsuaaAuth())
     assert saver._base == BASE_URL.rstrip("/")
 
 
 def test_init_explicit_args_win_over_env(monkeypatch):
-    """Explicit constructor args take priority over env vars."""
+    """Explicit XsuaaAuth(...) args take priority over env vars."""
     other_url = "https://from-env.example"
     monkeypatch.setenv("AGENT_MEMORY_BASE_URL", other_url)
     monkeypatch.setenv("AGENT_MEMORY_TOKEN_URL", "https://from-env.example/token")
@@ -1672,9 +1693,11 @@ def test_init_explicit_args_win_over_env(monkeypatch):
     monkeypatch.setenv("AGENT_MEMORY_CLIENT_SECRET", "env-client-secret")
     saver = HanaAgentMemorySaver(
         base_url=BASE_URL,
-        token_url=TOKEN_URL,
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
+        auth=XsuaaAuth(
+            token_url=TOKEN_URL,
+            client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
+        ),
     )
     assert saver._base == BASE_URL.rstrip("/")
 
@@ -1685,55 +1708,56 @@ def test_init_explicit_args_win_over_env(monkeypatch):
 
 
 def test_init_base_url_only_allowed():
-    """Should succeed with only base_url — IAS mode requires no XSUAA creds."""
-    saver = HanaAgentMemorySaver(base_url=BASE_URL)
+    """IASAuth() with only base_url succeeds — IAS requires no XSUAA creds."""
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IASAuth())
     assert saver._base == BASE_URL.rstrip("/")
 
 
-def test_init_partial_xsuaa_creds_raises():
-    """Providing only some XSUAA creds (token_url without client_id/secret) should raise."""
-    with pytest.raises(ValueError, match="partial XSUAA credentials"):
-        HanaAgentMemorySaver(base_url=BASE_URL, token_url=TOKEN_URL)
-
-
-def test_init_explicit_base_url_only_is_ias_even_with_xsuaa_env_vars(monkeypatch):
-    """Rule 1: explicit base_url alone → IAS, even when XSUAA env vars are present.
-
-    Ambient env vars must not silently flip the auth mode when the caller
-    passed only base_url.  This is the key no-cross-layer-mixing guarantee.
-    """
-    monkeypatch.setenv("AGENT_MEMORY_TOKEN_URL", TOKEN_URL)
-    monkeypatch.setenv("AGENT_MEMORY_CLIENT_ID", CLIENT_ID)
-    monkeypatch.setenv("AGENT_MEMORY_CLIENT_SECRET", CLIENT_SECRET)
-
-    saver = HanaAgentMemorySaver(base_url=BASE_URL)
-
-    assert saver._is_ias is True
-
-
-def test_init_env_base_url_only_is_ias(monkeypatch):
-    """Rule 3 (IAS branch): only AGENT_MEMORY_BASE_URL in env → IAS mode."""
-    monkeypatch.setenv("AGENT_MEMORY_BASE_URL", BASE_URL)
+def test_init_partial_xsuaa_creds_raises(monkeypatch):
+    """XsuaaAuth() with only some creds resolving should raise."""
     for var in (
         "AGENT_MEMORY_TOKEN_URL",
         "AGENT_MEMORY_CLIENT_ID",
         "AGENT_MEMORY_CLIENT_SECRET",
     ):
         monkeypatch.delenv(var, raising=False)
+    with pytest.raises(ValueError, match="XSUAA requires"):
+        HanaAgentMemorySaver(base_url=BASE_URL, auth=XsuaaAuth(token_url=TOKEN_URL))
 
-    saver = HanaAgentMemorySaver()
 
+def test_init_ias_default_token(monkeypatch):
+    """IASAuth(ias_access_token=...) creates a saver-level IASTokenFetcher."""
+    monkeypatch.delenv("AGENT_MEMORY_IAS_ACCESS_TOKEN", raising=False)
+    saver = HanaAgentMemorySaver(
+        base_url=BASE_URL, auth=IASAuth(ias_access_token="tok")
+    )
+    assert saver._ias_fetcher is not None
+    assert saver._ias_fetcher._source == "tok"
+
+
+def test_init_ias_default_token_from_env(monkeypatch):
+    """IASAuth() falls back to AGENT_MEMORY_IAS_ACCESS_TOKEN for its default token."""
+    monkeypatch.setenv("AGENT_MEMORY_IAS_ACCESS_TOKEN", "env-tok")
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IASAuth())
+    assert saver._ias_fetcher is not None
+    assert saver._ias_fetcher._source == "env-tok"
+
+
+def test_init_ias_only_base_url(monkeypatch):
+    """IASAuth() with only AGENT_MEMORY_BASE_URL in env → IAS mode."""
+    monkeypatch.setenv("AGENT_MEMORY_BASE_URL", BASE_URL)
+    saver = HanaAgentMemorySaver(auth=IASAuth())
     assert saver._is_ias is True
 
 
 def test_init_env_all_xsuaa_creds_is_xsuaa(monkeypatch):
-    """Rule 3 (XSUAA branch): all four AGENT_MEMORY_* env vars set → XSUAA mode."""
+    """XsuaaAuth() with all four AGENT_MEMORY_* env vars set → XSUAA mode."""
     monkeypatch.setenv("AGENT_MEMORY_BASE_URL", BASE_URL)
     monkeypatch.setenv("AGENT_MEMORY_TOKEN_URL", TOKEN_URL)
     monkeypatch.setenv("AGENT_MEMORY_CLIENT_ID", CLIENT_ID)
     monkeypatch.setenv("AGENT_MEMORY_CLIENT_SECRET", CLIENT_SECRET)
 
-    saver = HanaAgentMemorySaver()
+    saver = HanaAgentMemorySaver(auth=XsuaaAuth())
 
     assert saver._is_ias is False
 
@@ -1838,7 +1862,7 @@ def test_ias_only_saver_without_ias_access_token_raises(monkeypatch):
         "AGENT_MEMORY_CLIENT_SECRET",
     ):
         monkeypatch.delenv(var, raising=False)
-    saver = HanaAgentMemorySaver(base_url=BASE_URL)
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IASAuth())
     config = {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": SNAPSHOT_SCOPE}}
 
     with pytest.raises(ValueError, match="hana-agent-memory-serverless"):
@@ -1918,7 +1942,7 @@ def test_delete_thread_ias_only_saver_without_token_raises(monkeypatch):
         "AGENT_MEMORY_CLIENT_SECRET",
     ):
         monkeypatch.delenv(var, raising=False)
-    saver = HanaAgentMemorySaver(base_url=BASE_URL)
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IASAuth())
 
     with pytest.raises(ValueError, match="hana-agent-memory-serverless"):
         saver.delete_thread(THREAD_ID)
@@ -1947,7 +1971,7 @@ async def test_adelete_thread_ias_only_saver_without_token_raises(monkeypatch):
         "AGENT_MEMORY_CLIENT_SECRET",
     ):
         monkeypatch.delenv(var, raising=False)
-    saver = HanaAgentMemorySaver(base_url=BASE_URL)
+    saver = HanaAgentMemorySaver(base_url=BASE_URL, auth=IASAuth())
 
     with pytest.raises(ValueError, match="hana-agent-memory-serverless"):
         await saver.adelete_thread(THREAD_ID)
@@ -2170,3 +2194,139 @@ async def test_alist_propagates_ias_access_token_in_returned_configs(monkeypatch
     assert len(results) == 2
     for tup in results:
         assert tup.config["configurable"].get("ias_access_token") == "my-ias-token"
+
+
+# ---------------------------------------------------------------------------
+# IAS callable token tests
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_ias_sync_callable_token(monkeypatch):
+    """IAS saver with sync callable: callable is invoked and token is used as Bearer."""
+    row = _make_snapshot()
+    respx.get(SNAPSHOTS_URL).mock(
+        return_value=httpx.Response(200, json={"value": [row]})
+    )
+
+    call_count = 0
+
+    def my_token() -> str:
+        nonlocal call_count
+        call_count += 1
+        return "callable-token"
+
+    saver = HanaAgentMemorySaver(
+        base_url=BASE_URL, auth=IASAuth(ias_access_token=my_token)
+    )
+    config = {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": ""}}
+    result = saver.get_tuple(config)
+
+    assert result is not None
+    assert call_count == 1
+    assert respx.calls[0].request.headers["Authorization"] == "Bearer callable-token"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_ias_async_callable_token(monkeypatch):
+    """IAS saver with async callable: callable is awaited and token is used as Bearer."""
+    row = _make_snapshot()
+    respx.get(SNAPSHOTS_URL).mock(
+        return_value=httpx.Response(200, json={"value": [row]})
+    )
+
+    call_count = 0
+
+    async def my_async_token() -> str:
+        nonlocal call_count
+        call_count += 1
+        return "async-callable-token"
+
+    saver = HanaAgentMemorySaver(
+        base_url=BASE_URL, auth=IASAuth(ias_access_token=my_async_token)
+    )
+    config = {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": ""}}
+    result = await saver.aget_tuple(config)
+
+    assert result is not None
+    assert call_count == 1
+    assert (
+        respx.calls[0].request.headers["Authorization"] == "Bearer async-callable-token"
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_ias_callable_refresh_on_401(monkeypatch):
+    """IAS callable is re-invoked after a 401; the retried request uses the fresh token."""
+    row = _make_snapshot()
+    call_count = 0
+
+    def my_token() -> str:
+        nonlocal call_count
+        call_count += 1
+        return f"token-{call_count}"
+
+    # First request: 401 → fetcher re-invoked → retry succeeds
+    respx.get(SNAPSHOTS_URL).mock(
+        side_effect=[
+            httpx.Response(401),
+            httpx.Response(200, json={"value": [row]}),
+        ]
+    )
+
+    saver = HanaAgentMemorySaver(
+        base_url=BASE_URL, auth=IASAuth(ias_access_token=my_token)
+    )
+    config = {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": ""}}
+    result = await saver.aget_tuple(config)
+
+    assert result is not None
+    # Called twice: once for initial fetch, once after 401 invalidation
+    assert call_count == 2
+    assert respx.calls[1].request.headers["Authorization"] == "Bearer token-2"
+
+
+def test_ias_callable_returns_empty_raises(monkeypatch):
+    """IAS callable returning an empty string raises ValueError."""
+    saver = HanaAgentMemorySaver(
+        base_url=BASE_URL, auth=IASAuth(ias_access_token=lambda: "")
+    )
+    config = {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": ""}}
+    with pytest.raises(ValueError, match="empty token"):
+        saver.get_tuple(config)
+
+
+def test_ias_async_callable_on_sync_path_raises(monkeypatch):
+    """Async callable used on a sync checkpointer method raises TypeError."""
+
+    async def async_token() -> str:
+        return "tok"
+
+    saver = HanaAgentMemorySaver(
+        base_url=BASE_URL, auth=IASAuth(ias_access_token=async_token)
+    )
+    config = {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": ""}}
+    with pytest.raises(TypeError, match="async callable"):
+        saver.get_tuple(config)
+
+
+@respx.mock
+def test_ias_callable_not_embedded_in_returned_config(monkeypatch):
+    """Saver-level callable is never serialized into returned configs."""
+    row = _make_snapshot(parent_snapshot_id=PARENT_SNAPSHOT_ID)
+    respx.get(SNAPSHOTS_URL).mock(
+        return_value=httpx.Response(200, json={"value": [row]})
+    )
+    saver = HanaAgentMemorySaver(
+        base_url=BASE_URL,
+        auth=IASAuth(ias_access_token=lambda: "callable-token"),
+    )
+    config = {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": ""}}
+    result = saver.get_tuple(config)
+
+    assert result is not None
+    assert "ias_access_token" not in result.config["configurable"]
+    assert result.parent_config is not None
+    assert "ias_access_token" not in result.parent_config["configurable"]
