@@ -1,5 +1,5 @@
 name: Question
-description: Ask a question about the LangGraph Checkpoint for SAP Agent Memory Service.
+description: Ask a question about the LangGraph checkpointers for SAP Agent Memory Service.
 labels:
   - question
 body:

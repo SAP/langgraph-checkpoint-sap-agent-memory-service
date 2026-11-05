@@ -1,5 +1,5 @@
 name: Bug Report
-description: Released feature does not work as expected in the LangGraph Checkpoint for SAP Agent Memory Service.
+description: Released feature does not work as expected in the LangGraph checkpointers for SAP Agent Memory Service.
 labels:
   - bug
 body:
